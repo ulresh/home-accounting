@@ -1,0 +1,173 @@
+==== CLAUDE folder=home-accounting session=kotlin sessionId=e1493377-e6e2-46a4-9179-3cc5b70351b1 | отправлено 2026-06-12 15:24:11 | завершено 2026-06-12 15:25:45 ====
+На хосте **androidbuild** (192.168.30.15) отдельного standalone-компилятора Kotlin (`kotlinc`/`kotlin`) в `PATH` нет. Kotlin поставляется через Gradle и Android SDK:
+
+- **Основная версия: Kotlin 1.9.22** — встроена в Gradle 8.7 (`/opt/gradle/lib/kotlin-compiler-embeddable-1.9.22.jar`, и `gradle --version` показывает `Kotlin: 1.9.22`). Эта же версия лежит в кэше Gradle сборщика.
+- Дополнительно в кэше присутствует stdlib **1.8.20-RC2** (видимо, подтягивалась как зависимость в каком-то из проектов).
+- В Android SDK (`cmdline-tools`) есть свой встроенный kotlin-compiler для нужд lint (версия привязана к tools 31.1.4), но он не предназначен для прямой сборки.
+
+Итого: рабочая версия Kotlin — **1.9.22** (через Gradle 8.7).
+
+
+
+
+==== CLAUDE folder=home-accounting session=kotlin sessionId=e1493377-e6e2-46a4-9179-3cc5b70351b1 | отправлено 2026-06-12 15:28:38 | завершено 2026-06-12 15:31:05 ====
+Разобрался с устройством хоста. Важный момент: на сборочном хосте под «версией Kotlin» скрываются **две независимые вещи**, и менять их нужно по-разному.
+
+## 1. Что именно вы хотите обновить
+
+| Что | Где задаётся | Чем определяется | Что компилирует |
+|---|---|---|---|
+| **Kotlin внутри Gradle** (1.9.22) | дистрибутивом Gradle 8.7 | версией самого Gradle | только build-скрипты `*.gradle.kts` |
+| **Kotlin Gradle Plugin (KGP)** | в проекте (`plugins{}` / `libs.versions.toml` / `buildscript classpath`) | вами, в проекте | **код вашего приложения** ← это и есть «версия Kotlin для сборки» |
+
+Embedded-Kotlin (1.9.22) напрямую не «ставится» — он меняется только вместе с апгрейдом дистрибутива Gradle. Для сборки приложения важна вторая строка — **KGP**, и именно её обычно имеют в виду.
+
+## 2. Почему оффлайн это нетривиально
+
+Когда вы пишете `kotlin("android") version "2.x"`, Gradle идёт в `mavenCentral()`/`google()` и тянет не один jar, а целое дерево: `kotlin-gradle-plugin`, `-api`, `kotlin-compiler-embeddable`, `kotlin-build-tools-impl`, `kotlin-daemon`, `kotlin-stdlib`, `kotlin-reflect` + транзитивные (coroutines, intellij-deps и т.д.). Руками их не собрать. Без сети хост это всё не скачает — поэтому артефакты надо **доставить заранее**.
+
+Сейчас на хосте: в кэше только `kotlin-gradle-plugin/1.9.22`, локального `~/.m2` нет, init-скриптов нет, сеть наружу закрыта.
+
+## 3. Рекомендуемый способ — локальный Maven-репозиторий + init-скрипт
+
+**Шаг А — на машине С сетью** «прогреть» нужную версию и собрать из неё плоский репозиторий. Самый надёжный путь — реально собрать пустой проект на целевой версии Kotlin (тогда Gradle сам подтянет ровно нужный набор), затем выгрузить артефакты в каталог-репозиторий, например через init-скрипт `maven-publish`/копированием из `caches/modules-2`. Получите папку вида:
+
+```
+offline-repo/org/jetbrains/kotlin/kotlin-gradle-plugin/2.x/...
+offline-repo/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.x/...
+...
+```
+
+**Шаг Б — перенести на хост** (сеть наружу закрыта, но SSH через jump-хост у нас есть):
+
+```bash
+scp -r offline-repo androidbuild:~/offline-repo
+```
+
+**Шаг В — заставить Gradle брать всё локально.** Создать `~/.gradle/init.d/offline.gradle` на хосте:
+
+```groovy
+allprojects {
+    buildscript {
+        repositories { clear(); maven { url "file:///home/builder/offline-repo" } }
+    }
+    repositories { clear(); maven { url "file:///home/builder/offline-repo" } }
+}
+settingsEvaluated { s ->
+    s.pluginManagement.repositories { clear(); maven { url "file:///home/builder/offline-repo" } }
+}
+```
+
+и собирать с `--offline` (или `org.gradle.offline=true` в `gradle.properties`).
+
+**Шаг Г — поднять версию в проекте**: в `libs.versions.toml` / `plugins{}` указать новый KGP.
+
+## 4. О совместимости (это часто и ломает апгрейд)
+
+- Kotlin 2.x = новый компилятор **K2**; нужно проверить **AGP** (≥ 8.x) и саму версию **Gradle**.
+- Если используется **KSP** — его версия жёстко привязана к версии Kotlin (формат `2.x.x-1.0.x`), её тоже надо положить в оффлайн-репо.
+- Для Compose в Kotlin 2.0+ изменился способ подключения compose-compiler.
+- Если хотите обновить и embedded-Kotlin — это апгрейд Gradle: положить локально `gradle-8.1x-bin.zip` и прописать `distributionUrl=file:...` в `gradle-wrapper.properties` (Gradle 8.11 несёт Kotlin 2.0.21).
+
+## Что мне мешает сделать это прямо сейчас
+
+Согласно инструкции проекта я **ничего не качаю и не устанавливаю**, а ключевой шаг (шаг А) требует машины **с доступом в интернет**, чтобы скачать артефакты целевой версии Kotlin — на самом `androidbuild` сети нет, а в моём окружении качать нельзя. Поэтому от меня — методика выше; для реализации нужна машина-донор с сетью, откуда вы перенесёте оффлайн-репозиторий.
+
+Хотите, я уточню **конкретную целевую версию** (например, последняя стабильная 2.2.x) и подготовлю под неё точный список координат артефактов + готовый init-скрипт под пользователя `builder`?
+
+
+
+
+==== CLAUDE folder=home-accounting session=kotlin2 sessionId=394b1457-7458-4e63-9128-9b068b3c5de1 | отправлено 2026-06-12 22:04:26 | завершено 2026-06-12 22:04:50 ====
+В рабочей папке нет Kotlin-проекта (только `emacs-sessions`), так что отвечаю в общем виде.
+
+## JSON
+
+| Библиотека | Назначение | Зависимость (Gradle) |
+|---|---|---|
+| **kotlinx.serialization** | Официальная от JetBrains, идиоматичная для Kotlin, работает через `@Serializable` | `org.jetbrains.kotlinx:kotlinx-serialization-json` + плагин `plugin.serialization` |
+| **Jackson** (+ модуль для Kotlin) | Самая популярная в мире Java/Spring | `com.fasterxml.jackson.module:jackson-module-kotlin` |
+| **Gson** | Простая, от Google | `com.google.code.gson:gson` |
+| **Moshi** | Лёгкая, часто в Android | `com.squareup.moshi:moshi-kotlin` |
+
+Для чистого Kotlin/мультиплатформы обычно берут **kotlinx.serialization**, для Spring-проектов — **Jackson**.
+
+## TLS
+
+Тут важный момент: **отдельная библиотека для TLS как правило не нужна** — TLS встроен в JDK (пакеты `javax.net.ssl.*`: `SSLContext`, `SSLSocket`, `HttpsURLConnection`, и в Java 11+ — `java.net.http.HttpClient`). Kotlin использует тот же JVM-стек.
+
+Дополнительные библиотеки берут, когда нужно больше, чем даёт JDK:
+
+| Библиотека | Когда нужна |
+|---|---|
+| **встроенный JSSE (JDK)** | Базовый TLS, HTTPS — ничего ставить не надо |
+| **BouncyCastle** (`org.bouncycastle:bcprov-jdk18on`, `bctls-jdk18on`) | Доп. алгоритмы, работа с сертификатами/ключами, кастомный TLS-провайдер |
+| **Conscrypt** (`org.conscrypt:conscrypt-openjdk`) | TLS на базе BoringSSL/OpenSSL, новые версии TLS, производительность |
+| **OkHttp** (`com.squareup.okhttp3:okhttp`) | HTTP-клиент с удобной настройкой TLS, certificate pinning |
+| **Ktor** (`io.ktor:ktor-client-*` / `ktor-network-tls`) | HTTP-клиент/сервер на Kotlin, в т.ч. мультиплатформенный TLS |
+
+## Короткий вывод
+
+- **JSON**: нужна библиотека обязательно. Для Kotlin — `kotlinx-serialization-json`.
+- **TLS**: на JVM **встроен в JDK**, отдельная библиотека требуется только для расширенных сценариев (BouncyCastle/Conscrypt) или если работаете через HTTP-клиент (OkHttp/Ktor), который сам инкапсулирует настройку TLS.
+
+Если уточните контекст (чистый JVM, Android или Kotlin Multiplatform; нужен ли именно сетевой клиент или низкоуровневые сокеты) — подскажу точный минимальный набор зависимостей.
+
+
+
+
+==== CLAUDE folder=home-accounting session=kotlin2 sessionId=394b1457-7458-4e63-9128-9b068b3c5de1 | отправлено 2026-06-12 22:08:44 | завершено 2026-06-12 22:09:53 ====
+## Результат проверки `androidbuild2`
+
+**Runtime-библиотеки kotlinx.serialization на хосте НЕТ.**
+
+Что найдено:
+- `/opt/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar` (и `kotlin-serialization-compiler-plugin.jar`) — это **только compiler plugin**, который идёт в комплекте с Kotlin (`kotlinc-jvm 2.4.0`). Он генерирует код сериализаторов на этапе компиляции.
+- Самих runtime-артефактов — `kotlinx-serialization-core` и `kotlinx-serialization-json` — **не найдено** нигде: ни jar'ов в системе, ни в `~/.gradle/caches`, ни в `~/.m2`.
+
+**Вывод:** скомпилировать `@Serializable` плагин позволит, но собрать/запустить рабочий код, который реально (де)сериализует JSON, **нельзя** — runtime-зависимости отсутствуют. Их нужно либо положить в локальный Maven-репозиторий / Gradle-кэш, либо подтянуть из сети при сборке (`org.jetbrains.kotlinx:kotlinx-serialization-json:<версия>`).
+
+> Замечу: качать/устанавливать что-либо я по инструкции не стал — только проверил наличие.
+
+---
+
+## Как проверять (команды)
+
+Подключение:
+```bash
+ssh androidbuild2
+```
+
+**1. Runtime-библиотека где угодно в системе** (самое главное — нужны `core` и `json`):
+```bash
+find / \( -iname "kotlinx-serialization-core*.jar" \
+         -o -iname "kotlinx-serialization-json*.jar" \) 2>/dev/null
+```
+
+**2. Кэш Gradle** (куда складываются зависимости проектов):
+```bash
+find ~/.gradle/caches -iname "*kotlinx-serialization*" 2>/dev/null
+```
+
+**3. Локальный репозиторий Maven:**
+```bash
+find ~/.m2 -iname "*kotlinx-serialization*" 2>/dev/null
+# или по пути группы:
+ls -R ~/.m2/repository/org/jetbrains/kotlinx/ 2>/dev/null | grep -i serial
+```
+
+**4. Что идёт в комплекте с самим Kotlin** (там лежит только compiler plugin, не runtime):
+```bash
+ls -1 /opt/kotlinc/lib/ | grep -i serial
+```
+
+Как отличать по имени:
+- `kotlinx-serialization-**compiler-plugin**.jar` → плагин компилятора (есть всегда с kotlinc, для работы недостаточно).
+- `kotlinx-serialization-**core**-<ver>.jar`, `kotlinx-serialization-**json**-<ver>.jar` → именно runtime, который и нужен для (де)сериализации.
+
+Всё в одну строку (то, что запускал я):
+```bash
+ssh androidbuild2 'find / \( -iname "kotlinx-serialization-core*.jar" -o -iname "kotlinx-serialization-json*.jar" \) 2>/dev/null; \
+  find ~/.gradle/caches ~/.m2 -iname "*kotlinx-serialization*" 2>/dev/null'
+```
+Пустой вывод первой части = runtime-библиотеки нет.
