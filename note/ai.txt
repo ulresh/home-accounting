@@ -1,10 +1,16 @@
 !2026-06-12 09:35:04
 
+CLAUDE SINGLE DEFAULT folder=home-accounting session=kotlin
+
 Какая версия Kotlin доступна на хосте androidbuild?
 
 Как поставить на хост androidbuild актуальную версию Kotlin
 при условии что там нет доступа к Сети?
 
+
+CLAUDE DEFAULT folder=home-accounting session=develop
+
+CLAUDE TASK
 
 ДомУчёт
 home-accounting
@@ -97,3 +103,19 @@ getFilesDir()/Основная/2020/sync/DN.jsonl
 Поиск.
 
 Всё недостающее придумай сам.
+
+androidbuild
+/home/builder/project/home-accounting/android
+Kotlin.
+
+appbuild
+/home/builder/project/home-accounting/desktop
+qt, boost::asio, boost::json.
+boost на appbuild в /usr/local.
+
+Разработай оба приложения и проверь их сборку.
+Тестирование по отдельному запросу.
+Для тестирования буду пробрасывать X на appbuild.
+И подключать планшет к androidbuild.
+
+END OF TASK
