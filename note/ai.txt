@@ -1,8 +1,5 @@
 !2026-06-12 09:35:04
 
-TODO
-* Данные читать не построчно. Границы значений определять JSON-парсером.
-
 CLAUDE SINGLE DEFAULT folder=home-accounting session=kotlin2
 
 Библиотека kotlinx.serialization умеет разбирать JSON инкрементно по
@@ -159,3 +156,40 @@ ai-r.txt
 
 На build-машинах сети нет. На androidbuild2 для gradle настроен прокси.
 Продолжай.
+
+/home/reshu/project/home-accounting/note/ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 10:37:40 | завершено 2026-06-13 11:32:21 ====
+
+
+Используй ту версию Kotlin, которая интегрирована в AGP. Продолжай.
+
+/home/reshu/project/home-accounting/note/ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 11:33:54 | завершено 2026-06-13 11:35:12 ====
+
+
+Почему ты смотришь  AGP 9.2.1? На androidbuild2 ведь стоит 9.5.1.
+
+/home/reshu/project/home-accounting/note/ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 11:36:56 | завершено 2026-06-13 12:11:30 ====
+
+
+Данные читать не построчно. Границы значений определять JSON-парсером.
+
+/home/reshu/project/home-accounting/note/ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 12:12:05 | завершено 2026-06-13 12:22:47 ====
+
+
+Пробросил сессию X на appbuild.
+Для тестирования используй DISPLAY=localhost:10.0.
+Приложение зависло после того, как я открыл синхронизацию,
+запустил ожидание соединения, закрыл окно синхронизации.
+Исправь эту ошибку.
+Т.е. закрытие окна синхронизации должно завершать ожидание соединения.
+Также команда оконной системы закрыть приложение тоже должно завершать
+ожидание соединения.
+Проведи тестирование остальных функций desktop-приложения.
+
+
+
+TODO
+* 
