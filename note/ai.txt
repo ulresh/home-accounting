@@ -1,34 +1,5 @@
 !2026-06-12 09:35:04
 
-CLAUDE SINGLE DEFAULT folder=home-accounting session=kotlin
-
-Какая версия Kotlin доступна на хосте androidbuild?
-
-/home/reshu/project/home-accounting/note/ai-r.txt
-==== CLAUDE folder=home-accounting session=kotlin sessionId=e1493377-e6e2-46a4-9179-3cc5b70351b1 | отправлено 2026-06-12 15:24:11 | завершено 2026-06-12 15:25:45 ====
-
-Как поставить на хост androidbuild в Gradle актуальную версию Kotlin
-при условии что там нет доступа к Сети?
-
-/home/reshu/project/home-accounting/note/ai-r.txt
-==== CLAUDE folder=home-accounting session=kotlin sessionId=e1493377-e6e2-46a4-9179-3cc5b70351b1 | отправлено 2026-06-12 15:28:38 | завершено 2026-06-12 15:31:05 ====
-
-
-CLAUDE SINGLE DEFAULT folder=home-accounting session=kotlin2
-
-Какие библиотеки требуются Kotlin для работы с json и с tls?
-
-/home/reshu/project/home-accounting/note/ai-r.txt
-==== CLAUDE folder=home-accounting session=kotlin2 sessionId=394b1457-7458-4e63-9128-9b068b3c5de1 | отправлено 2026-06-12 22:04:26 | завершено 2026-06-12 22:04:50 ====
-
-Проверь наличие библиотеки kotlinx.serialization на хосте androidbuild2.
-Напиши как проверять.
-
-/home/reshu/project/home-accounting/note/ai-r.txt
-==== CLAUDE folder=home-accounting session=kotlin2 sessionId=394b1457-7458-4e63-9128-9b068b3c5de1 | отправлено 2026-06-12 22:08:44 | завершено 2026-06-12 22:09:53 ====
-
-
-
 CLAUDE DEFAULT folder=home-accounting session=develop
 
 CLAUDE TASK
@@ -127,7 +98,9 @@ getFilesDir()/Основная/2020/sync/DN.jsonl
 
 androidbuild2
 /home/builder/project/home-accounting/android
-Kotlin.
+Kotlin 2.4.0.
+kotlinx.serialization 1.11.0.
+minSdk = 26.
 
 appbuild
 /home/builder/project/home-accounting/desktop
