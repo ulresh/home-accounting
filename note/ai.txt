@@ -1,5 +1,8 @@
 !2026-06-12 09:35:04
 
+TODO
+* Данные читать не построчно. Границы значений определять JSON-парсером.
+
 CLAUDE SINGLE DEFAULT folder=home-accounting session=kotlin2
 
 Библиотека kotlinx.serialization умеет разбирать JSON инкрементно по
@@ -135,3 +138,24 @@ boost на appbuild в /usr/local.
 И подключать планшет к androidbuild2.
 
 END OF TASK
+ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 10:15:26 | завершено 2026-06-13 10:19:37 ====
+-- завис на 2-х запросах разрешения
+
+
+CLAUDE SINGLE DEFAULT folder=home-accounting session=develop
+
+продолжи
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 10:26:52 | завершено 2026-06-13 10:28:50 ====
+
+
+на существующие проекты смотреть не надо, продолжи
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-13 10:30:01 | завершено 2026-06-13 10:35:29 ====
+
+
+На build-машинах сети нет. На androidbuild2 для gradle настроен прокси.
+Продолжай.
