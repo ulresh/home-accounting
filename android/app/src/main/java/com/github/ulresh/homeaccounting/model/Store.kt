@@ -1,7 +1,6 @@
 package com.github.ulresh.homeaccounting.model
 
 import com.github.ulresh.homeaccounting.sync.Crypto
-import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.*
 import java.io.File
 import java.text.SimpleDateFormat
@@ -57,14 +56,52 @@ class Store(val root: File) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
     // ---------- ввод/вывод файлов ----------
-    // Читаем не построчно: границы каждого значения определяет JSON-парсер
-    // (потоковый разбор последовательности значений, разделённых пробелами/переводами).
-    @OptIn(ExperimentalSerializationApi::class)
+    // Читаем не построчно: границы каждого значения определяются разбором JSON-структуры
+    // (учёт вложенности {}[] и строк), затем каждое значение разбирается JSON-парсером.
+    // Устойчиво к значению на нескольких строках и к нескольким значениям в одной строке.
     private fun readValues(f: File, onValue: (JsonElement) -> Unit) {
         if (!f.exists()) return
-        f.inputStream().use { ins ->
-            json.decodeToSequence(ins, JsonElement.serializer(), DecodeSequenceMode.WHITESPACE_SEPARATED)
-                .forEach(onValue)
+        val text = f.readText()
+        val n = text.length
+        var i = 0
+        while (i < n) {
+            while (i < n && text[i].isWhitespace()) i++
+            if (i >= n) break
+            val start = i
+            when (text[i]) {
+                '{', '[' -> {                      // объект или массив — по балансу скобок
+                    var depth = 0; var inStr = false; var esc = false
+                    while (i < n) {
+                        val ch = text[i]
+                        if (inStr) {
+                            when {
+                                esc -> esc = false
+                                ch == '\\' -> esc = true
+                                ch == '"' -> inStr = false
+                            }
+                            i++
+                        } else when (ch) {
+                            '"' -> { inStr = true; i++ }
+                            '{', '[' -> { depth++; i++ }
+                            '}', ']' -> { depth--; i++; if (depth == 0) break }
+                            else -> i++
+                        }
+                    }
+                }
+                '"' -> {                           // строка верхнего уровня
+                    i++
+                    var esc = false
+                    while (i < n) {
+                        val ch = text[i]; i++
+                        if (esc) esc = false
+                        else if (ch == '\\') esc = true
+                        else if (ch == '"') break
+                    }
+                }
+                else -> while (i < n && !text[i].isWhitespace()) i++  // число/true/false/null
+            }
+            val chunk = text.substring(start, i).trim()
+            if (chunk.isNotEmpty()) runCatching { onValue(json.parseToJsonElement(chunk)) }
         }
     }
 
