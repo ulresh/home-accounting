@@ -4,6 +4,7 @@ project(home-accounting LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -33,6 +34,7 @@ set(HA_SOURCES
     src/ui/SyncDialog.h
     src/ui/SettingsDialog.h
     src/ui/CatalogDialog.h
+    resources/app.qrc
 )
 
 add_executable(home-accounting src/main.cpp ${HA_SOURCES})

@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QFont>
+#include <QIcon>
 #include "model/Store.h"
 #include "ui/MainWindow.h"
 
@@ -8,6 +9,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("home-accounting");
     QApplication::setOrganizationName("com.github.ulresh");
+    QApplication::setWindowIcon(QIcon(":/icon.png"));
 
     ha::Store store;
     try {
