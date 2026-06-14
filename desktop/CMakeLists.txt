@@ -27,10 +27,12 @@ set(HA_SOURCES
     src/ui/EventDialog.cpp
     src/ui/SyncDialog.cpp
     src/ui/SettingsDialog.cpp
+    src/ui/CatalogDialog.cpp
     src/ui/MainWindow.h
     src/ui/EventDialog.h
     src/ui/SyncDialog.h
     src/ui/SettingsDialog.h
+    src/ui/CatalogDialog.h
 )
 
 add_executable(home-accounting src/main.cpp ${HA_SOURCES})

@@ -5,8 +5,8 @@
 
 class QTableWidget;
 class QLineEdit;
-class QComboBox;
 class QLabel;
+class QTimer;
 
 namespace ha { class Store; }
 
@@ -22,6 +22,7 @@ private slots:
     void onDelete();
     void onSync();
     void onManagePeople();
+    void onCatalog();
     void onSettings();
 
 private:
@@ -30,7 +31,7 @@ private:
     ha::Store& store_;
     QTableWidget* table_;
     QLineEdit*    search_;
-    QComboBox*    catFilter_;
     QLabel*       dbLabel_;
+    QTimer*       filterTimer_ = nullptr;
     std::vector<ha::Event> rows_;
 };

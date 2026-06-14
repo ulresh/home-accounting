@@ -2,12 +2,13 @@
 #include "EventDialog.h"
 #include "SyncDialog.h"
 #include "SettingsDialog.h"
+#include "CatalogDialog.h"
 #include "../model/Store.h"
 
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QLineEdit>
-#include <QComboBox>
+#include <QTimer>
 #include <QLabel>
 #include <QToolBar>
 #include <QAction>
@@ -27,15 +28,20 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
 
-    // Панель фильтров
+    // Панель фильтра — одно поле (наименование / человек / категория)
     auto* filters = new QHBoxLayout();
     search_ = new QLineEdit(central);
-    search_->setPlaceholderText(tr("Поиск по наименованию…"));
-    catFilter_ = new QComboBox(central);
-    filters->addWidget(new QLabel(tr("Каталог:"), central));
-    filters->addWidget(catFilter_);
+    search_->setPlaceholderText(tr("Фильтр: наименование, кому или категория…"));
+    search_->setClearButtonEnabled(true);
     filters->addWidget(search_, 1);
     root->addLayout(filters);
+
+    // Дебаунс: фильтр пересчитывается фоном, быстрый набор нескольких букв
+    // объединяется в одно обновление.
+    filterTimer_ = new QTimer(this);
+    filterTimer_->setSingleShot(true);
+    filterTimer_->setInterval(150);
+    connect(filterTimer_, &QTimer::timeout, this, &MainWindow::refresh);
 
     // Таблица
     table_ = new QTableWidget(central);
@@ -61,6 +67,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     tb->addSeparator();
     QAction* aSync = tb->addAction(tr("Синхронизация"));
     QAction* aPpl  = tb->addAction(tr("Люди"));
+    QAction* aCat  = tb->addAction(tr("Каталог"));
     QAction* aSet  = tb->addAction(tr("Настройки"));
 
     connect(aAdd,  &QAction::triggered, this, &MainWindow::onAdd);
@@ -68,11 +75,11 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     connect(aDel,  &QAction::triggered, this, &MainWindow::onDelete);
     connect(aSync, &QAction::triggered, this, &MainWindow::onSync);
     connect(aPpl,  &QAction::triggered, this, &MainWindow::onManagePeople);
+    connect(aCat,  &QAction::triggered, this, &MainWindow::onCatalog);
     connect(aSet,  &QAction::triggered, this, &MainWindow::onSettings);
     connect(table_, &QTableWidget::doubleClicked, this, &MainWindow::onEdit);
 
-    connect(search_, &QLineEdit::textChanged, this, &MainWindow::refresh);
-    connect(catFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refresh);
+    connect(search_, &QLineEdit::textChanged, this, [this]{ filterTimer_->start(); });
 
     dbLabel_ = new QLabel(this);
     statusBar()->addPermanentWidget(dbLabel_);
@@ -90,29 +97,8 @@ void MainWindow::refresh() {
     dbLabel_->setText(tr("База: %1   Устройство №%2")
         .arg(QString::fromStdString(store_.database())).arg(store_.deviceNo()));
 
-    // Обновить список категорий, сохранив выбор
-    QString cur = catFilter_->currentText();
-    {
-        QSignalBlocker b(catFilter_);
-        catFilter_->clear();
-        catFilter_->addItem(tr("Все"));
-        for (auto& c : store_.catalog())
-            catFilter_->addItem(QString::fromStdString(c.category));
-        int idx = catFilter_->findText(cur);
-        catFilter_->setCurrentIndex(idx >= 0 ? idx : 0);
-    }
-
-    QString q = search_->text().trimmed().toLower();
-    QString cat = catFilter_->currentIndex() <= 0 ? QString() : catFilter_->currentText();
-
-    rows_.clear();
-    for (auto& e : store_.events()) {
-        QString subj = QString::fromStdString(e.subject);
-        if (!q.isEmpty() && !subj.toLower().contains(q)) continue;
-        QString c = QString::fromStdString(store_.categoryOf(e.subject));
-        if (!cat.isEmpty() && c != cat) continue;
-        rows_.push_back(e);
-    }
+    const QString q = search_->text().trimmed();
+    rows_ = store_.filter(q.toStdString());
 
     QLocale loc;
     table_->setRowCount((int)rows_.size());
@@ -189,6 +175,12 @@ void MainWindow::onManagePeople() {
         store_.addPerson(name.trimmed().toStdString());
         refresh();
     }
+}
+
+void MainWindow::onCatalog() {
+    CatalogDialog dlg(store_, this);
+    dlg.exec();
+    refresh();
 }
 
 void MainWindow::onSettings() {

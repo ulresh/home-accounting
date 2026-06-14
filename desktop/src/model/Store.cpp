@@ -458,6 +458,77 @@ void Store::upsertCatalog(const CatalogEntry& e) {
     saveCatalog();
 }
 
+void Store::replaceCatalog(const std::vector<CatalogEntry>& list) {
+    catalog_ = list;
+    saveCatalog();
+}
+
+// UTF-8 нижний регистр для ASCII и кириллицы (А-Я, Ё).
+static std::string utf8Lower(const std::string& s) {
+    std::string out; out.reserve(s.size());
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { out += (char)std::tolower(c); ++i; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < n) {
+            unsigned cp = ((c & 0x1F) << 6) | ((unsigned char)s[i+1] & 0x3F);
+            if (cp >= 0x0410 && cp <= 0x042F) cp += 0x20;   // А-Я -> а-я
+            else if (cp == 0x0401) cp = 0x0451;             // Ё -> ё
+            out += (char)(0xC0 | (cp >> 6));
+            out += (char)(0x80 | (cp & 0x3F));
+            i += 2;
+        } else { out += (char)c; ++i; }
+    }
+    return out;
+}
+
+static bool icontains(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return true;
+    return utf8Lower(hay).find(utf8Lower(needle)) != std::string::npos;
+}
+
+std::vector<Event> Store::filter(const std::string& q) const {
+    auto all = events();
+    if (q.empty()) return all;
+
+    // категории, чьё имя совпало с q -> их наименования (с раскрытием вложенных)
+    std::set<std::string> memberSet;
+    for (auto& c : catalog_)
+        if (icontains(c.category, q)) {
+            auto m = categoryMembers(c.category);
+            memberSet.insert(m.begin(), m.end());
+        }
+
+    std::vector<Event> out;
+    for (auto& e : all) {
+        bool bySubject = icontains(e.subject, q);
+        bool byPerson  = e.people && icontains(*e.people, q);
+        bool byCategory = memberSet.count(e.subject) > 0;
+        if (bySubject || byPerson || byCategory) out.push_back(e);
+    }
+    return out;
+}
+
+std::set<std::string> Store::categoryMembers(const std::string& category) const {
+    std::set<std::string> result, visited;
+    std::vector<std::string> stack{category};
+    while (!stack.empty()) {
+        std::string cat = stack.back(); stack.pop_back();
+        if (visited.count(cat)) continue;
+        visited.insert(cat);
+        for (auto& e : catalog_) {
+            if (e.category != cat) continue;
+            for (auto& it : e.items) {
+                result.insert(it);
+                // если элемент сам является категорией — раскрыть вложенно
+                for (auto& e2 : catalog_)
+                    if (e2.category == it) { stack.push_back(it); break; }
+            }
+        }
+    }
+    return result;
+}
+
 // ---- идентичность ----
 fs::path Store::certPath() const { return root_ / "identity" / "cert.pem"; }
 fs::path Store::keyPath()  const { return root_ / "identity" / "key.pem"; }

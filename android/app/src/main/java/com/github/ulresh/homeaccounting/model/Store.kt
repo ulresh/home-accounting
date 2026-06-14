@@ -474,6 +474,47 @@ class Store(val root: File) {
         saveCatalog()
     }
 
+    fun replaceCatalog(list: List<CatalogEntry>) {       // полная перезапись (редактор)
+        catalogList.clear()
+        catalogList.addAll(list)
+        saveCatalog()
+    }
+
+    // Все наименования категории с раскрытием вложенных категорий.
+    fun categoryMembers(category: String): Set<String> {
+        val result = LinkedHashSet<String>()
+        val visited = HashSet<String>()
+        val stack = ArrayDeque<String>()
+        stack.addLast(category)
+        while (stack.isNotEmpty()) {
+            val cat = stack.removeLast()
+            if (!visited.add(cat)) continue
+            for (e in catalogList) {
+                if (e.category != cat) continue
+                for (item in e.items) {
+                    result.add(item)
+                    if (catalogList.any { it.category == item }) stack.addLast(item)
+                }
+            }
+        }
+        return result
+    }
+
+    // Умный фильтр: совпадение по наименованию, по человеку (кому) или по
+    // категории (тогда показываем все её наименования). Регистр игнорируется.
+    fun filter(q: String): List<Event> {
+        val all = events()
+        if (q.isBlank()) return all
+        val memberSet = HashSet<String>()
+        for (c in catalogList)
+            if (c.category.contains(q, ignoreCase = true)) memberSet.addAll(categoryMembers(c.category))
+        return all.filter { e ->
+            e.subject.contains(q, ignoreCase = true) ||
+                (e.people?.contains(q, ignoreCase = true) == true) ||
+                memberSet.contains(e.subject)
+        }
+    }
+
     // ---------- идентичность ----------
     fun ensureIdentity() {
         identityDir().mkdirs()

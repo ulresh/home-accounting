@@ -57,6 +57,14 @@ public:
     void addPerson(const std::string& name);
     void removePerson(const std::string& name);
     void upsertCatalog(const CatalogEntry& e);           // объединение по категории
+    void replaceCatalog(const std::vector<CatalogEntry>& list);  // полная перезапись (редактор)
+
+    // Все наименования категории с раскрытием вложенных категорий.
+    std::set<std::string> categoryMembers(const std::string& category) const;
+
+    // Умный фильтр: совпадение по наименованию, по человеку (кому) или по
+    // категории (тогда показываем все её наименования). Регистр игнорируется.
+    std::vector<Event> filter(const std::string& q) const;
 
     // --- идентичность устройства ---
     void ensureIdentity();                               // ключ/сертификат + device_no

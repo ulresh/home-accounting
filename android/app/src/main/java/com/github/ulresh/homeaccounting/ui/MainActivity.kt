@@ -34,6 +34,7 @@ import com.github.ulresh.homeaccounting.sync.SyncResult
 import com.github.ulresh.homeaccounting.sync.SyncServer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -67,23 +68,24 @@ private fun fmtCost(c: Double): String =
 fun AppRoot(store: Store) {
     var tick by remember { mutableIntStateOf(0) }
     var search by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("") }   // "" = все
+    var applied by remember { mutableStateOf("") }   // дебаунсированное значение фильтра
 
     var addOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Event?>(null) }
     var syncOpen by remember { mutableStateOf(false) }
     var peopleOpen by remember { mutableStateOf(false) }
     var dbOpen by remember { mutableStateOf(false) }
+    var catalogOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var selectedKey by remember { mutableStateOf<String?>(null) }
 
-    val events = remember(tick, search, category) {
-        store.events().filter { e ->
-            (search.isBlank() || e.subject.contains(search, ignoreCase = true)) &&
-                (category.isBlank() || store.categoryOf(e.subject) == category)
-        }
+    // Фильтр меняется по каждой букве фоном; быстрый набор нескольких букв
+    // объединяется в одно обновление (дебаунс).
+    LaunchedEffect(search) {
+        delay(150)
+        applied = search.trim()
     }
-    val categories = remember(tick) { listOf("") + store.catalog().map { it.category } }
+    val events = remember(tick, applied) { store.filter(applied) }
 
     Scaffold(
         topBar = {
@@ -97,6 +99,8 @@ fun AppRoot(store: Store) {
                                 onClick = { menuOpen = false; syncOpen = true })
                             DropdownMenuItem(text = { Text("Люди") },
                                 onClick = { menuOpen = false; peopleOpen = true })
+                            DropdownMenuItem(text = { Text("Каталог") },
+                                onClick = { menuOpen = false; catalogOpen = true })
                             DropdownMenuItem(text = { Text("База: ${store.database}") },
                                 onClick = { menuOpen = false; dbOpen = true })
                         }
@@ -109,16 +113,12 @@ fun AppRoot(store: Store) {
         }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            Row(Modifier.padding(8.dp).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = search, onValueChange = { search = it },
-                    label = { Text("Поиск") }, singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-                CategoryDropdown(categories, category) { category = it }
-            }
+            OutlinedTextField(
+                value = search, onValueChange = { search = it },
+                label = { Text("Фильтр: наименование, кому или категория") },
+                singleLine = true,
+                modifier = Modifier.padding(8.dp).fillMaxWidth()
+            )
             HorizontalDivider()
             if (events.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -154,6 +154,9 @@ fun AppRoot(store: Store) {
     }
     if (peopleOpen) {
         PeopleDialog(store, onDismiss = { peopleOpen = false; tick++ })
+    }
+    if (catalogOpen) {
+        CatalogDialog(store, onDismiss = { catalogOpen = false; tick++ })
     }
     if (dbOpen) {
         DatabaseDialog(store, onDismiss = { dbOpen = false }, onSwitched = { dbOpen = false; tick++ })
@@ -212,22 +215,79 @@ private fun EventRow(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CategoryDropdown(options: List<String>, selected: String, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val label = if (selected.isBlank()) "Все" else selected
-    Box {
-        OutlinedButton(onClick = { expanded = true }) { Text(label) }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { opt ->
-                DropdownMenuItem(
-                    text = { Text(if (opt.isBlank()) "Все" else opt) },
-                    onClick = { onSelect(opt); expanded = false }
-                )
+private fun CatalogDialog(store: Store, onDismiss: () -> Unit) {
+    val work = remember { mutableStateListOf<CatalogEntry>().apply { addAll(store.catalog()) } }
+    var selected by remember { mutableIntStateOf(if (work.isEmpty()) -1 else 0) }
+    var newCat by remember { mutableStateOf("") }
+    var newItem by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Редактор каталога") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("Категории:", style = MaterialTheme.typography.titleSmall)
+                work.forEachIndexed { idx, entry ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { selected = idx }, modifier = Modifier.weight(1f)) {
+                            Text(
+                                (if (idx == selected) "▸ " else "") + entry.category,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        TextButton(onClick = {
+                            work.removeAt(idx)
+                            selected = if (work.isEmpty()) -1 else minOf(selected, work.size - 1)
+                        }) { Text("−") }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(newCat, { newCat = it }, label = { Text("Новая категория") },
+                        singleLine = true, modifier = Modifier.weight(1f))
+                    Button(onClick = {
+                        val v = newCat.trim()
+                        if (v.isNotEmpty() && work.none { it.category == v }) {
+                            work.add(CatalogEntry(v, emptyList())); selected = work.size - 1; newCat = ""
+                        }
+                    }) { Text("+") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                Text("Наименования / вложенные категории:", style = MaterialTheme.typography.titleSmall)
+                if (selected in work.indices) {
+                    work[selected].items.forEachIndexed { i, name ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(name, modifier = Modifier.weight(1f))
+                            TextButton(onClick = {
+                                work[selected] = work[selected].copy(
+                                    items = work[selected].items.toMutableList().also { it.removeAt(i) }
+                                )
+                            }) { Text("−") }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(newItem, { newItem = it },
+                            label = { Text("Наименование / категория") }, singleLine = true,
+                            modifier = Modifier.weight(1f))
+                        Button(onClick = {
+                            val v = newItem.trim()
+                            if (v.isNotEmpty() && !work[selected].items.contains(v)) {
+                                work[selected] = work[selected].copy(items = work[selected].items + v)
+                                newItem = ""
+                            }
+                        }) { Text("+") }
+                    }
+                }
             }
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(onClick = { store.replaceCatalog(work.toList()); onDismiss() }) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
+    )
 }
 
 @Composable
