@@ -8,7 +8,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -73,6 +75,7 @@ fun AppRoot(store: Store) {
     var peopleOpen by remember { mutableStateOf(false) }
     var dbOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var selectedKey by remember { mutableStateOf<String?>(null) }
 
     val events = remember(tick, search, category) {
         store.events().filter { e ->
@@ -124,9 +127,14 @@ fun AppRoot(store: Store) {
             } else {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(events, key = { it.key() }) { e ->
-                        EventRow(store, e, onEdit = { editing = e }, onDelete = {
-                            store.deleteEvent(e); tick++
-                        })
+                        EventRow(
+                            store, e,
+                            selected = selectedKey == e.key(),
+                            onLongPress = { selectedKey = e.key() },
+                            onClick = { selectedKey = null },
+                            onEdit = { editing = e; selectedKey = null },
+                            onDelete = { store.deleteEvent(e); selectedKey = null; tick++ },
+                        )
                         HorizontalDivider()
                     }
                 }
@@ -155,10 +163,24 @@ fun AppRoot(store: Store) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun EventRow(store: Store, e: Event, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun EventRow(
+    store: Store,
+    e: Event,
+    selected: Boolean,
+    onLongPress: () -> Unit,
+    onClick: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
     var confirmDel by remember { mutableStateOf(false) }
     ListItem(
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongPress),
+        colors = ListItemDefaults.colors(
+            containerColor = if (selected) MaterialTheme.colorScheme.surfaceVariant
+            else MaterialTheme.colorScheme.surface
+        ),
         headlineContent = { Text("${e.subject}   ${fmtCost(e.cost)}") },
         supportingContent = {
             val cat = store.categoryOf(e.subject)
@@ -170,12 +192,14 @@ private fun EventRow(store: Store, e: Event, onEdit: () -> Unit, onDelete: () ->
             ).joinToString("  ·  ")
             Text(extra)
         },
-        trailingContent = {
-            Row {
-                TextButton(onClick = onEdit) { Text("Изм.") }
-                TextButton(onClick = { confirmDel = true }) { Text("Удал.") }
+        trailingContent = if (selected) {
+            {
+                Row {
+                    TextButton(onClick = onEdit) { Text("Изм.") }
+                    TextButton(onClick = { confirmDel = true }) { Text("Удал.") }
+                }
             }
-        }
+        } else null
     )
     if (confirmDel) {
         AlertDialog(
@@ -260,7 +284,7 @@ private fun EventDialog(
                 Box {
                     OutlinedTextField(
                         value = people, onValueChange = { people = it },
-                        label = { Text("Человек") }, singleLine = true,
+                        label = { Text("Кому") }, singleLine = true,
                         trailingIcon = { TextButton(onClick = { pplMenu = true }) { Text("▾") } },
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -273,7 +297,7 @@ private fun EventDialog(
                 }
                 OutlinedTextField(
                     value = volume, onValueChange = { volume = it },
-                    label = { Text("Объём") }, singleLine = true,
+                    label = { Text("Количество") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
