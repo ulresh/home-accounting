@@ -41,7 +41,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     table_ = new QTableWidget(central);
     table_->setColumnCount(6);
     table_->setHorizontalHeaderLabels(
-        {tr("Дата"), tr("Категория"), tr("Наименование"), tr("Стоимость"), tr("Человек"), tr("Объём")});
+        {tr("Дата"), tr("Категория"), tr("Наименование"), tr("Стоимость"), tr("Кому"), tr("Количество")});
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);

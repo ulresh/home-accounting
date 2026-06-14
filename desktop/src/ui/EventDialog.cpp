@@ -65,8 +65,8 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
     form->addRow(tr("Стоимость:"), cost_);
     form->addRow(tr("Дата:"), when_);
     form->addRow("", withTime_);
-    form->addRow(tr("Человек:"), people_);
-    form->addRow(tr("Объём:"), volume_);
+    form->addRow(tr("Кому:"), people_);
+    form->addRow(tr("Количество:"), volume_);
 
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     form->addRow(bb);
