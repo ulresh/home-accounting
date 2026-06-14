@@ -297,6 +297,11 @@ ai-r.txt
 ==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-14 12:59:50 | завершено 2026-06-14 13:00:45 ====
 
 
+Собери оба приложения в release варианте
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-14 13:05:59 | завершено 2026-06-14 13:09:32 ====
+
 
 
 
