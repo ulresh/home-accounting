@@ -334,7 +334,7 @@ getFilesDir()/Основная/sync/DN.jsonl
 всех полей, кроме служебных "edit_datetime","rec_no","dev_no".
 
 Измени заголовок на форму
-{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume"],"reference":["edit_datetime","rec_no","dev_no"]}ю
+{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume"],"reference":["edit_datetime","rec_no","dev_no"]}.
 Порядок и состав из reference использовать в разборе
 {"delete":[...],"this":[...],...} (как в части delete, так и в части this).
 
