@@ -306,9 +306,9 @@ ai-r.txt
 
 !2026-06-15 10:42:23
 
-TODO +++ CLAUDE TASK
+CLAUDE TASK
 
-На appbuild я изменил файлы +++.
+На appbuild я изменил файл desktop/src/model/Store.cpp.
 
 В {"delete":[...]} добавь кроме информации о том, какую запись удалить,
 ещё и когда и на каком устройстве запись была удалена, а в случае, если
@@ -374,14 +374,11 @@ END OF TASK
 
 
 TODO
-* ensureIdentity - собственно он это и делает - Добавь в device себя.
-** +++ убрать 3 цикла по devices_
+* +++ translateLine обработка случая с отсутствием исходного dn в map
 * Что такое reserveDeviceNo
 * translateLine не пересобирать строку если DN тот же - сперва проверить, может быть так и есть уже
 * translateLine нет реализации header - скорее всего этой реализации нет и
 в read тоже
-* translateLine обработка случая с отсутствием исходного dn в map
-* Store::switchDatabase разобраться с трюком ensureIdentity
 * Store::loadEvents === check point - он перемудрил с удалениями, переделать
 * Проверить что он там накрутил с DN при синхронизации.
 MEMORY

@@ -541,21 +541,23 @@ void Store::ensureIdentity() {
     myPubkey_ = crypto::publicKeyFromCert(certPath().string());
 
     // зарегистрировать себя в device.jsonl текущей базы
-    int found = -1;
-    for (auto& d : devices_) if (d.pubkey == myPubkey_) { found = d.no; break; }
-    if (found < 0) {
-        int maxNo = 0;
-        for (auto& d : devices_) maxNo = std::max(maxNo, d.no);
-        int myNo = (deviceNo_ > 0) ? deviceNo_ : maxNo + 1;
-        // не допускаем конфликта номера
-        for (auto& d : devices_) if (d.no == myNo) myNo = maxNo + 1;
-        Device self{myNo, myPubkey_, "this"};
-        devices_.push_back(self);
-        saveDevices();
-        deviceNo_ = myNo;
-    } else {
-        deviceNo_ = found;
-    }
+    int maxNo = 0;
+    for (auto& d : devices_)
+	if (d.pubkey == myPubkey_) {
+	    if (deviceNo_ != d.no) {
+		deviceNo_ = d.no;
+		saveConfig();
+	    }
+	    return;
+	}
+	else {
+	    if (d.no == deviceNo_) deviceNo_ = 0;
+	    if (d.no > maxNo) maxNo = d.no;
+	}
+    if (deviceNo_ <= 0) deviceNo_ = maxNo + 1;
+    Device self{deviceNo_, myPubkey_, "this"};
+    devices_.push_back(self);
+    saveDevices();
     saveConfig();
 }
 
