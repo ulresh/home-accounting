@@ -333,8 +333,10 @@ getFilesDir()/Основная/sync/DN.jsonl
 при синхронизации при совпадении
 всех полей, кроме служебных "edit_datetime","rec_no","dev_no".
 
+Добавь поле Комментарий comment.
+
 Измени заголовок на форму
-{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume"],"reference":["edit_datetime","rec_no","dev_no"]}.
+{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"],"reference":["edit_datetime","rec_no","dev_no"]}.
 Порядок и состав из reference использовать в разборе
 {"delete":[...],"this":[...],...} (как в части delete, так и в части this).
 
