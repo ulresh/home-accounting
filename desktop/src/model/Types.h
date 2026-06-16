@@ -15,8 +15,9 @@ struct Event {
     std::string edit_datetime;         // "YYYY-MM-DD HH:MM:SS" — момент записи
     int         rec_no = 0;            // RN — добавочный номер в пределах секунды/устройства
     int         dev_no = 0;            // DN — номер устройства-автора
-    std::optional<std::string> people; // имя человека или пусто
-    std::optional<std::string> volume; // объём/количество, напр. "2 кг"
+    std::optional<std::string> people;  // имя человека или пусто
+    std::optional<std::string> volume;  // объём/количество, напр. "2 кг"
+    std::optional<std::string> comment; // произвольный комментарий
 
     // Глобальный ключ записи.
     std::string key() const {

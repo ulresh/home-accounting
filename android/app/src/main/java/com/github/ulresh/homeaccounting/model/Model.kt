@@ -10,6 +10,7 @@ data class Event(
     val devNo: Int,
     val people: String? = null,
     val volume: String? = null,
+    val comment: String? = null,
 ) {
     fun key(): String = "$editDatetime|$recNo|$devNo"
 }
@@ -27,11 +28,24 @@ data class CatalogEntry(
     val items: List<String>,
 )
 
-// Дамп базы для синхронизации.
-data class SyncDump(
-    val db: String,
-    val people: List<String>,
-    val catalog: List<CatalogEntry>,
-    val devices: List<Device>,
-    val events: List<Pair<String, String>>,   // (monthfile, raw jsonl line)
+// Схема событийной строки: порядок/состав колонок + состав «ссылки» (reference).
+data class Schema(
+    val columns: List<String>,
+    val reference: List<String>,
+)
+
+// Состояние файла для инкрементной синхронизации.
+data class FileState(
+    val size: Int = 0,
+    val sha1: String = "",
+)
+
+// Блок данных, передаваемый «без разбора» (хвост файла).
+//   kind = "event-tail"  -> [event-tail, yyyymm, offset, size]\n<данные>\n
+//   kind = "device-data" / "people-data" / "catalog-data" -> [kind, size]\n<данные>\n
+data class SyncBlob(
+    val kind: String,
+    val month: Int = 0,    // yyyymm, только для event-tail
+    val offset: Int = 0,   // только для event-tail
+    val data: String = "",
 )

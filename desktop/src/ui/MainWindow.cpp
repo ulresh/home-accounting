@@ -45,9 +45,9 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
 
     // Таблица
     table_ = new QTableWidget(central);
-    table_->setColumnCount(6);
+    table_->setColumnCount(7);
     table_->setHorizontalHeaderLabels(
-        {tr("Дата"), tr("Категория"), tr("Наименование"), tr("Стоимость"), tr("Кому"), tr("Количество")});
+        {tr("Дата"), tr("Категория"), tr("Наименование"), tr("Стоимость"), tr("Кому"), tr("Количество"), tr("Комментарий")});
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -113,6 +113,7 @@ void MainWindow::refresh() {
         set(3, loc.toString(e.cost, 'f', (e.cost == (long long)e.cost) ? 0 : 2));
         set(4, e.people ? QString::fromStdString(*e.people) : QString());
         set(5, e.volume ? QString::fromStdString(*e.volume) : QString());
+        set(6, e.comment ? QString::fromStdString(*e.comment) : QString());
     }
     statusBar()->showMessage(tr("Записей: %1").arg(rows_.size()));
 }
@@ -124,11 +125,12 @@ void MainWindow::onAdd() {
         QMessageBox::warning(this, tr("Добавление"), tr("Укажите наименование."));
         return;
     }
-    std::optional<std::string> ppl, vol;
+    std::optional<std::string> ppl, vol, com;
     if (auto p = dlg.people()) ppl = p->toStdString();
     if (auto v = dlg.volume()) vol = v->toStdString();
+    if (auto c = dlg.comment()) com = c->toStdString();
     store_.addEvent(dlg.eventDateTime().toStdString(), dlg.subject().toStdString(),
-                    dlg.cost(), ppl, vol);
+                    dlg.cost(), ppl, vol, com);
     refresh();
 }
 
@@ -138,11 +140,12 @@ void MainWindow::onEdit() {
     ha::Event old = rows_[r];
     EventDialog dlg(store_, &old, this);
     if (dlg.exec() != QDialog::Accepted) return;
-    std::optional<std::string> ppl, vol;
+    std::optional<std::string> ppl, vol, com;
     if (auto p = dlg.people()) ppl = p->toStdString();
     if (auto v = dlg.volume()) vol = v->toStdString();
+    if (auto c = dlg.comment()) com = c->toStdString();
     store_.editEvent(old, dlg.eventDateTime().toStdString(), dlg.subject().toStdString(),
-                     dlg.cost(), ppl, vol);
+                     dlg.cost(), ppl, vol, com);
     refresh();
 }
 

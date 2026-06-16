@@ -46,6 +46,9 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
     volume_ = new QLineEdit(this);
     volume_->setPlaceholderText(tr("напр. 2 кг"));
 
+    comment_ = new QLineEdit(this);
+    comment_->setPlaceholderText(tr("необязательно"));
+
     if (edit) {
         subject_->setCurrentText(QString::fromStdString(edit->subject));
         cost_->setValue(edit->cost);
@@ -58,6 +61,7 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
         }
         if (edit->people) people_->setCurrentText(QString::fromStdString(*edit->people));
         if (edit->volume) volume_->setText(QString::fromStdString(*edit->volume));
+        if (edit->comment) comment_->setText(QString::fromStdString(*edit->comment));
     }
 
     auto* form = new QFormLayout(this);
@@ -67,6 +71,7 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
     form->addRow("", withTime_);
     form->addRow(tr("Кому:"), people_);
     form->addRow(tr("Количество:"), volume_);
+    form->addRow(tr("Комментарий:"), comment_);
 
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     form->addRow(bb);
@@ -91,4 +96,9 @@ std::optional<QString> EventDialog::volume() const {
     QString v = volume_->text().trimmed();
     if (v.isEmpty()) return std::nullopt;
     return v;
+}
+std::optional<QString> EventDialog::comment() const {
+    QString c = comment_->text().trimmed();
+    if (c.isEmpty()) return std::nullopt;
+    return c;
 }

@@ -49,3 +49,23 @@ foreach(tgt home-accounting guitest)
         Threads::Threads
     )
 endforeach()
+
+# Юнит-тесты модели и синхронизации (без Qt).
+set(HA_MODEL_SOURCES
+    src/model/Paths.cpp
+    src/model/Jsonl.cpp
+    src/model/Store.cpp
+    src/sync/Crypto.cpp
+    src/sync/QrCode.cpp
+    src/sync/SyncService.cpp
+)
+add_executable(syncv2test tools/syncv2test.cpp ${HA_MODEL_SOURCES})
+target_include_directories(syncv2test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src /usr/local/include)
+target_link_libraries(syncv2test PRIVATE
+    Boost::json OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+
+# Кросс-платформенная проверка совместимости desktop<->Android (формат + обмен).
+add_executable(xcompattest tools/xcompattest.cpp ${HA_MODEL_SOURCES})
+target_include_directories(xcompattest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src /usr/local/include)
+target_link_libraries(xcompattest PRIVATE
+    Boost::json OpenSSL::SSL OpenSSL::Crypto Threads::Threads)

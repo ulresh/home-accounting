@@ -1,14 +1,13 @@
 package com.github.ulresh.homeaccounting.sync
 
-import com.github.ulresh.homeaccounting.model.CatalogEntry
-import com.github.ulresh.homeaccounting.model.Device
 import com.github.ulresh.homeaccounting.model.Store
-import com.github.ulresh.homeaccounting.model.SyncDump
+import com.github.ulresh.homeaccounting.model.SyncBlob
 import kotlinx.serialization.json.*
-import java.io.BufferedReader
-import java.io.BufferedWriter
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import javax.net.ssl.SSLServerSocket
@@ -64,47 +63,81 @@ internal fun randomCode(n: Int): String {
     return (1..n).map { a[r.nextInt(a.length)] }.joinToString("")
 }
 
-internal fun dumpToJson(d: SyncDump): JsonObject = buildJsonObject {
-    put("db", d.db)
-    put("people", buildJsonArray { d.people.forEach { add(it) } })
-    put("catalog", buildJsonArray {
-        d.catalog.forEach { c -> add(buildJsonArray { add(c.category); c.items.forEach { add(it) } }) }
-    })
-    put("devices", buildJsonArray {
-        d.devices.forEach { dev ->
-            add(buildJsonArray { add(dev.no); add(dev.pubkey); if (dev.name.isNotEmpty()) add(dev.name) })
-        }
-    })
-    put("events", buildJsonArray {
-        d.events.forEach { (mf, line) -> add(buildJsonArray { add(mf); add(line) }) }
-    })
-}
-
-internal fun dumpFromJson(o: JsonObject): SyncDump {
-    val people = (o["people"] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList()
-    val catalog = (o["catalog"] as? JsonArray)?.map { c ->
-        val a = c.jsonArray
-        CatalogEntry(a[0].jsonPrimitive.content, a.drop(1).map { it.jsonPrimitive.content })
-    } ?: emptyList()
-    val devices = (o["devices"] as? JsonArray)?.map { d ->
-        val a = d.jsonArray
-        Device(a[0].jsonPrimitive.int, a[1].jsonPrimitive.content,
-            if (a.size > 2) a[2].jsonPrimitive.content else "")
-    } ?: emptyList()
-    val events = (o["events"] as? JsonArray)?.map { e ->
-        val a = e.jsonArray
-        a[0].jsonPrimitive.content to a[1].jsonPrimitive.content
-    } ?: emptyList()
-    return SyncDump(o["db"]?.jsonPrimitive?.content ?: "", people, catalog, devices, events)
-}
-
 private fun peerPubkey(s: SSLSocket): String = runCatching {
     Crypto.pubkeyOf(s.session.peerCertificates[0])
 }.getOrDefault("")
 
-private fun writeLine(w: BufferedWriter, line: String) {
-    w.write(line); w.write("\n"); w.flush()
+// ---- покадровый ввод/вывод (строки + сырые блоки) ----
+private fun writeLine(out: OutputStream, line: String) {
+    out.write((line + "\n").toByteArray(Charsets.UTF_8)); out.flush()
 }
+private fun readLine(ins: InputStream): String {
+    val baos = ByteArrayOutputStream()
+    while (true) {
+        val b = ins.read()
+        if (b < 0 || b == '\n'.code) break
+        baos.write(b)
+    }
+    var s = baos.toString("UTF-8")
+    if (s.endsWith("\r")) s = s.dropLast(1)
+    return s
+}
+private fun readExact(ins: InputStream, n: Int): ByteArray {
+    val buf = ByteArray(n)
+    var off = 0
+    while (off < n) {
+        val r = ins.read(buf, off, n - off)
+        if (r < 0) throw java.io.IOException("short read")
+        off += r
+    }
+    return buf
+}
+
+// Отдать набор блоков: заголовок-строка + сырые данные + '\n'. Завершить ["end"].
+private fun sendBlobs(out: OutputStream, blobs: List<SyncBlob>) {
+    for (b in blobs) {
+        val bytes = b.data.toByteArray(Charsets.UTF_8)
+        val header = if (b.kind == "event-tail")
+            buildJsonArray { add("event-tail"); add(b.month); add(b.offset); add(bytes.size) }
+        else
+            buildJsonArray { add(b.kind); add(bytes.size) }
+        out.write((header.toString() + "\n").toByteArray(Charsets.UTF_8))
+        out.write(bytes)
+        out.write('\n'.code)
+    }
+    out.write("[\"end\"]\n".toByteArray(Charsets.UTF_8))
+    out.flush()
+}
+
+// Принять блоки до ["end"], каждый сразу применить к store.
+private fun recvBlobs(ins: InputStream, store: Store, replaceLists: Boolean) {
+    while (true) {
+        val line = readLine(ins)
+        if (line.isEmpty()) continue
+        val a = J.parseToJsonElement(line).jsonArray
+        val kind = a[0].jsonPrimitive.content
+        if (kind == "end") break
+        val blob = if (kind == "event-tail") {
+            val month = a[1].jsonPrimitive.int
+            val offset = a[2].jsonPrimitive.int
+            val size = a[3].jsonPrimitive.int
+            val data = String(readExact(ins, size), Charsets.UTF_8)
+            readExact(ins, 1)
+            SyncBlob("event-tail", month, offset, data)
+        } else {
+            val size = a[1].jsonPrimitive.int
+            val data = String(readExact(ins, size), Charsets.UTF_8)
+            readExact(ins, 1)
+            SyncBlob(kind, 0, 0, data)
+        }
+        store.syncApply(blob, replaceLists, null)
+    }
+}
+
+private fun summaryLine(received: Int): String =
+    buildJsonObject { put("summary", buildJsonObject { put("received", received) }) }.toString()
+private fun summaryReceived(line: String): Int =
+    J.parseToJsonElement(line).jsonObject["summary"]!!.jsonObject["received"]!!.jsonPrimitive.int
 
 // ---------------- Сервер ----------------
 class SyncServer(private val store: Store) {
@@ -112,7 +145,7 @@ class SyncServer(private val store: Store) {
     private var code: String = ""
 
     fun listen(): PairInfo {
-        val ctx = Crypto.sslContext()
+        val ctx = store.sslContext()
         val ss = ctx.serverSocketFactory.createServerSocket(0) as SSLServerSocket
         ss.needClientAuth = true
         server = ss
@@ -124,59 +157,66 @@ class SyncServer(private val store: Store) {
 
     fun waitAndSync(confirm: ConfirmFn): SyncResult {
         val ss = server ?: return SyncResult(error = "not listening")
+        var sock: SSLSocket? = null
         return try {
-            val sock = ss.accept() as SSLSocket
+            sock = ss.accept() as SSLSocket
             sock.startHandshake()
             val peer = peerPubkey(sock)
-            val r = BufferedReader(InputStreamReader(sock.inputStream, Charsets.UTF_8))
-            val w = BufferedWriter(OutputStreamWriter(sock.outputStream, Charsets.UTF_8))
+            val ins = BufferedInputStream(sock.inputStream)
+            val out = BufferedOutputStream(sock.outputStream)
 
-            val hello = J.parseToJsonElement(r.readLine() ?: "{}").jsonObject["hello"]!!.jsonObject
+            val hello = J.parseToJsonElement(readLine(ins)).jsonObject["hello"]!!.jsonObject
             val clientDb = hello["db"]!!.jsonPrimitive.content
             val clientCode = hello["code"]!!.jsonPrimitive.content
             val clientDevNo = hello["device_no"]?.jsonPrimitive?.intOrNull ?: 0
             val clientHasData = hello["has_data"]?.jsonPrimitive?.booleanOrNull ?: false
 
             if (clientCode != code) {
-                writeLine(w, """{"error":"bad_code"}""")
+                writeLine(out, """{"error":"bad_code"}""")
                 return SyncResult(error = "bad_code", peerDb = clientDb, peerPubkey = peer)
             }
             if (clientDb != store.database) {
-                writeLine(w, buildJsonObject { put("error", "db_mismatch"); put("db", store.database) }.toString())
+                writeLine(out, buildJsonObject { put("error", "db_mismatch"); put("db", store.database) }.toString())
                 return SyncResult(error = "db_mismatch", peerDb = clientDb, peerPubkey = peer)
             }
             // Разрешение конфликта собственных номеров (меняет ТОЛЬКО одно устройство).
             if (clientDevNo == store.deviceNo && !store.hasData() && clientHasData) {
                 store.renumberSelf(maxOf(store.maxDeviceNo(), clientDevNo) + 1)
             }
-            val ackMaxDn = store.maxDeviceNo()   // до резервирования партнёра
+            val ackMaxDn = store.maxDeviceNo()
             if (!store.knowsDevice(peer)) {
                 if (!confirm(peer)) {
-                    writeLine(w, """{"error":"rejected"}""")
+                    writeLine(out, """{"error":"rejected"}""")
                     return SyncResult(error = "rejected", peerDb = clientDb, peerPubkey = peer)
                 }
                 store.reserveDeviceNo(peer, clientDevNo, "peer")
             }
 
-            writeLine(w, buildJsonObject {
+            writeLine(out, buildJsonObject {
                 put("ok", true); put("db", store.database)
                 put("device_no", store.deviceNo); put("pubkey", store.myPubkey)
                 put("max_dn", ackMaxDn)
             }.toString())
 
-            writeLine(w, dumpToJson(store.dump()).toString())
-            val remote = dumpFromJson(J.parseToJsonElement(r.readLine() ?: "{}").jsonObject)
-            val ks = store.mergeDump(remote)
+            // ----- инкрементный обмен файлами -----
+            val peerLocal = store.reserveDeviceNo(peer, clientDevNo, "peer")
+            store.syncBegin(peerLocal)
+            recvBlobs(ins, store, replaceLists = false)        // принять и слить
+            store.syncDedup()                                  // убрать дубликаты
+            sendBlobs(out, store.syncBuildOutgoing(forceLists = true)) // отдать итог
+            val ks = store.syncReceived()
 
-            writeLine(w, buildJsonObject { put("summary", buildJsonObject { put("received", ks) }) }.toString())
-            val cs = J.parseToJsonElement(r.readLine() ?: "{}").jsonObject
-            val kc = cs["summary"]!!.jsonObject["received"]!!.jsonPrimitive.int
+            writeLine(out, summaryLine(ks))
+            val kc = summaryReceived(readLine(ins))
 
-            runCatching { sock.close() }
+            store.syncCommit(peerLocal)
+            store.syncEnd()
             SyncResult(ok = true, peerDb = clientDb, peerPubkey = peer, sent = kc, received = ks)
         } catch (e: Exception) {
+            store.syncEnd()
             SyncResult(error = e.message ?: "ошибка")
         } finally {
+            runCatching { sock?.close() }
             cancel()
         }
     }
@@ -185,15 +225,16 @@ class SyncServer(private val store: Store) {
 // ---------------- Клиент ----------------
 class SyncClient(private val store: Store) {
     fun connect(info: PairInfo, confirm: ConfirmFn): SyncResult {
+        var sock: SSLSocket? = null
         return try {
-            val ctx = Crypto.sslContext()
-            val sock = ctx.socketFactory.createSocket(info.ip, info.port) as SSLSocket
+            val ctx = store.sslContext()
+            sock = ctx.socketFactory.createSocket(info.ip, info.port) as SSLSocket
             sock.startHandshake()
             val peer = peerPubkey(sock)
-            val r = BufferedReader(InputStreamReader(sock.inputStream, Charsets.UTF_8))
-            val w = BufferedWriter(OutputStreamWriter(sock.outputStream, Charsets.UTF_8))
+            val ins = BufferedInputStream(sock.inputStream)
+            val out = BufferedOutputStream(sock.outputStream)
 
-            writeLine(w, buildJsonObject {
+            writeLine(out, buildJsonObject {
                 put("hello", buildJsonObject {
                     put("db", store.database); put("device_no", store.deviceNo)
                     put("pubkey", store.myPubkey); put("code", info.code)
@@ -201,42 +242,42 @@ class SyncClient(private val store: Store) {
                 })
             }.toString())
 
-            val ack = J.parseToJsonElement(r.readLine() ?: "{}").jsonObject
+            val ack = J.parseToJsonElement(readLine(ins)).jsonObject
             ack["error"]?.let { err ->
                 val peerDb = ack["db"]?.jsonPrimitive?.content ?: ""
-                runCatching { sock.close() }
                 return SyncResult(error = err.jsonPrimitive.content, peerDb = peerDb, peerPubkey = peer)
             }
             val peerDb = ack["db"]?.jsonPrimitive?.content ?: ""
-
-            // Разрешение конфликта собственных номеров на стороне клиента
-            // (если сервер не сменил свой; меняет только одно устройство).
-            run {
-                val serverDevNo = ack["device_no"]?.jsonPrimitive?.intOrNull ?: 0
-                val serverMaxDn = ack["max_dn"]?.jsonPrimitive?.intOrNull ?: serverDevNo
-                if (serverDevNo == store.deviceNo && !store.hasData()) {
-                    store.renumberSelf(maxOf(store.maxDeviceNo(), serverMaxDn) + 1)
-                }
+            val serverDevNo = ack["device_no"]?.jsonPrimitive?.intOrNull ?: 0
+            val serverMaxDn = ack["max_dn"]?.jsonPrimitive?.intOrNull ?: serverDevNo
+            if (serverDevNo == store.deviceNo && !store.hasData()) {
+                store.renumberSelf(maxOf(store.maxDeviceNo(), serverMaxDn) + 1)
             }
 
             if (!store.knowsDevice(peer)) {
-                if (!confirm(peer)) { runCatching { sock.close() }; return SyncResult(error = "rejected", peerPubkey = peer) }
-                val devNo = ack["device_no"]?.jsonPrimitive?.intOrNull ?: 0
-                store.reserveDeviceNo(peer, devNo, "peer")
+                if (!confirm(peer)) return SyncResult(error = "rejected", peerPubkey = peer)
+                store.reserveDeviceNo(peer, serverDevNo, "peer")
             }
 
-            val remote = dumpFromJson(J.parseToJsonElement(r.readLine() ?: "{}").jsonObject)
-            val kc = store.mergeDump(remote)
-            writeLine(w, dumpToJson(store.dump()).toString())
+            // ----- инкрементный обмен файлами -----
+            val peerLocal = store.reserveDeviceNo(peer, serverDevNo, "peer")
+            store.syncBegin(peerLocal)
+            sendBlobs(out, store.syncBuildOutgoing(forceLists = false)) // отдать свой хвост
+            recvBlobs(ins, store, replaceLists = true)                  // принять итог как есть
+            store.syncDedup()
+            val kc = store.syncReceived()
 
-            val sv = J.parseToJsonElement(r.readLine() ?: "{}").jsonObject
-            val ks = sv["summary"]!!.jsonObject["received"]!!.jsonPrimitive.int
-            writeLine(w, buildJsonObject { put("summary", buildJsonObject { put("received", kc) }) }.toString())
+            val ks = summaryReceived(readLine(ins))
+            writeLine(out, summaryLine(kc))
 
-            runCatching { sock.close() }
+            store.syncCommit(peerLocal)
+            store.syncEnd()
             SyncResult(ok = true, peerDb = peerDb, peerPubkey = peer, sent = ks, received = kc)
         } catch (e: Exception) {
+            store.syncEnd()
             SyncResult(error = e.message ?: "ошибка")
+        } finally {
+            runCatching { sock?.close() }
         }
     }
 }

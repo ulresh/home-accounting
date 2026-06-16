@@ -70,4 +70,16 @@ dependencies {
 
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
+    // Юнит-тесты модели и синхронизации (JVM, без эмулятора).
+    testImplementation("junit:junit:4.13.2")
+}
+
+// Прокинуть переменные кросс-платформенной проверки в test-воркер.
+// LC_ALL=C.UTF-8 — чтобы JVM кодировала ИМЕНА файлов в UTF-8 (как на реальном
+// Android), иначе кириллический каталог базы «Основная» бьётся в "????????".
+tasks.withType<Test>().configureEach {
+    environment("LC_ALL", "C.UTF-8")
+    environment("XC_MODE", System.getenv("XC_MODE") ?: "")
+    environment("XC_DIR", System.getenv("XC_DIR") ?: "")
 }

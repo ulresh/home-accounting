@@ -21,6 +21,7 @@ public:
     double  cost() const;
     std::optional<QString> people() const;
     std::optional<QString> volume() const;
+    std::optional<QString> comment() const;
 
 private:
     ha::Store& store_;
@@ -30,4 +31,5 @@ private:
     QCheckBox*      withTime_;
     QComboBox*      people_;
     QLineEdit*      volume_;
+    QLineEdit*      comment_;
 };

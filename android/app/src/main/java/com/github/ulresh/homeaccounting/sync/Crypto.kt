@@ -25,10 +25,10 @@ object Crypto {
     private const val ALIAS = "device"
     private val PW = "homeaccounting".toCharArray()
 
-    private var keyStore: KeyStore? = null
-
-    // Создать (при первом запуске) или загрузить ключ/сертификат. Вернуть pubkey.
-    fun ensureIdentity(dir: File): Pair<String, Unit> {
+    // Создать (при первом запуске) или загрузить ключ/сертификат.
+    // Возвращает (pubkey, keyStore). Состояние НЕ хранится в объекте, чтобы в одном
+    // процессе могли сосуществовать несколько независимых хранилищ (в т.ч. в тестах).
+    fun ensureIdentity(dir: File): Pair<String, KeyStore> {
         val ksFile = File(dir, "identity.p12")
         val ks = KeyStore.getInstance("PKCS12")
         if (ksFile.exists()) {
@@ -53,17 +53,15 @@ object Crypto {
             dir.mkdirs()
             ksFile.outputStream().use { ks.store(it, PW) }
         }
-        keyStore = ks
         val cert = ks.getCertificate(ALIAS)
-        return pubkeyOf(cert) to Unit
+        return pubkeyOf(cert) to ks
     }
 
     fun pubkeyOf(cert: Certificate): String =
         Base64.getEncoder().encodeToString(cert.publicKey.encoded)
 
     // SSLContext с нашим ключом и доверием ко всем (идентичность проверяется по pubkey).
-    fun sslContext(): SSLContext {
-        val ks = keyStore ?: error("identity not initialized")
+    fun sslContext(ks: KeyStore): SSLContext {
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(ks, PW)
         val trustAll = arrayOf<TrustManager>(object : X509TrustManager {

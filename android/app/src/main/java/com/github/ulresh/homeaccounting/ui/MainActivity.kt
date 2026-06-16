@@ -143,13 +143,13 @@ fun AppRoot(store: Store) {
     }
 
     if (addOpen) {
-        EventDialog(store, null, onDismiss = { addOpen = false }) { dt, subj, cost, ppl, vol ->
-            store.addEvent(dt, subj, cost, ppl, vol); addOpen = false; tick++
+        EventDialog(store, null, onDismiss = { addOpen = false }) { dt, subj, cost, ppl, vol, com ->
+            store.addEvent(dt, subj, cost, ppl, vol, com); addOpen = false; tick++
         }
     }
     editing?.let { ev ->
-        EventDialog(store, ev, onDismiss = { editing = null }) { dt, subj, cost, ppl, vol ->
-            store.editEvent(ev, dt, subj, cost, ppl, vol); editing = null; tick++
+        EventDialog(store, ev, onDismiss = { editing = null }) { dt, subj, cost, ppl, vol, com ->
+            store.editEvent(ev, dt, subj, cost, ppl, vol, com); editing = null; tick++
         }
     }
     if (peopleOpen) {
@@ -192,6 +192,7 @@ private fun EventRow(
                 if (cat.isNotEmpty()) cat else null,
                 e.people,
                 e.volume,
+                e.comment,
             ).joinToString("  ·  ")
             Text(extra)
         },
@@ -295,13 +296,14 @@ private fun EventDialog(
     store: Store,
     edit: Event?,
     onDismiss: () -> Unit,
-    onSave: (dt: String, subject: String, cost: Double, people: String?, volume: String?) -> Unit,
+    onSave: (dt: String, subject: String, cost: Double, people: String?, volume: String?, comment: String?) -> Unit,
 ) {
     var subject by remember { mutableStateOf(edit?.subject ?: "") }
     var cost by remember { mutableStateOf(edit?.cost?.let { fmtCost(it) } ?: "") }
     var dt by remember { mutableStateOf(edit?.eventDatetime ?: nowStr()) }
     var people by remember { mutableStateOf(edit?.people ?: "") }
     var volume by remember { mutableStateOf(edit?.volume ?: "") }
+    var comment by remember { mutableStateOf(edit?.comment ?: "") }
     var subjMenu by remember { mutableStateOf(false) }
 
     val items = remember { store.catalog().flatMap { it.items }.distinct() }
@@ -360,13 +362,18 @@ private fun EventDialog(
                     label = { Text("Количество") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = comment, onValueChange = { comment = it },
+                    label = { Text("Комментарий") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         confirmButton = {
             TextButton(onClick = {
                 if (subject.isNotBlank()) {
                     onSave(dt.trim(), subject.trim(), cost.toDoubleOrNull() ?: 0.0,
-                        people.ifBlank { null }, volume.ifBlank { null })
+                        people.ifBlank { null }, volume.ifBlank { null }, comment.ifBlank { null })
                 }
             }) { Text("Сохранить") }
         },
