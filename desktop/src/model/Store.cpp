@@ -265,8 +265,11 @@ void Store::loadConfig() {
         if (auto* n = o.if_contains("current_device_no")) deviceNo_ = (int)n->as_int64();
         if (auto* f = o.if_contains("font_size")) fontSize_ = (int)f->as_int64();
     });
-    if (!dbs.empty() && std::find(dbs.begin(), dbs.end(), db_) == dbs.end()) db_ = dbs.front();
-    if (dbs.empty()) writeAtomic(root_ / "database.jsonl", json::serialize(jv(db_)) + "\n");
+    if (dbs.empty())
+	writeAtomic(root_ / "database.jsonl",
+		    json::serialize(jv(db_)) + "\n");
+    else if (std::find(dbs.begin(), dbs.end(), db_) == dbs.end())
+	db_ = dbs.front();
 }
 
 void Store::saveConfig() {
@@ -379,16 +382,14 @@ void Store::loadEvents() {
             (void)raw;
             if (v.is_object()) {
                 auto& o = v.as_object();
-                if (o.if_contains("header")) { cur = schemaFromHeader(o); monthSchema_[yyyymm] = cur; sawHeader = true; return; }
-                if (auto* del = o.if_contains("delete")) {
+                if (o.if_contains("header")) { cur = schemaFromHeader(o); monthSchema_[yyyymm] = cur; sawHeader = true; }
+                else if (auto* del = o.if_contains("delete")) {
                     RecRef t = parseRef(del->as_array(), cur.reference);
                     applyDeleteToState(keyStr(t.edit, t.rn, t.dn));
                     anyEventLines_ = true;
-                    return;
                 }
-                return;
             }
-            if (v.is_array()) {
+            else if (v.is_array()) {
                 Event e = parseEventArray(v.as_array(), cur);
                 anyEventLines_ = true;
                 applyEventToState(e);
@@ -400,7 +401,6 @@ void Store::loadEvents() {
 
 void Store::applyEventToState(const Event& e) {
     std::string key = e.key();
-    if (deletedTargets_.count(key)) return;     // событие удалено
     live_[key] = e;
 }
 void Store::applyDeleteToState(const std::string& targetKey) {
@@ -446,16 +446,16 @@ int Store::allocRecNo(const std::string& stamp) {
     return next;
 }
 
-void Store::appendToMonth(int yyyymm, const std::string& line, bool isHeader, const Schema* sch) {
+void Store::appendToMonth(int yyyymm, const std::string& line) {
     appendLine(monthPath(yyyymm), line);
-    if (isHeader && sch) monthSchema_[yyyymm] = *sch;
-    if (!isHeader) anyEventLines_ = true;
 }
 void Store::ensureCanonicalHeader(int yyyymm) {
     Schema can = canonicalSchema();
-    auto it = monthSchema_.find(yyyymm);
-    if (it == monthSchema_.end() || it->second != can)
-        appendToMonth(yyyymm, canonicalHeaderLine(), true, &can);
+    auto &cur = monthSchema_[yyyymm];
+    if(cur != can) {
+        appendToMonth(yyyymm, canonicalHeaderLine());
+	cur = can;
+    }
 }
 
 bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update) {
@@ -463,7 +463,7 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     if (sync_) { ensureDeleteKeysLoaded(); if (sync_->deleteKeys.count(dkey)) return false; }
     std::string stamp = nowStamp();
     int rn = allocRecNo(stamp);
-    int ym = yyyymmOf(stamp);
+    int ym = yyyymmOf(tgtEdit);
     ensureCanonicalHeader(ym);
     json::object o;
     json::array del; del.emplace_back(jv(tgtEdit)); del.emplace_back(tgtRn); del.emplace_back(tgtDn);
@@ -471,7 +471,7 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     o["delete"] = std::move(del);
     o["this"]   = std::move(ths);
     if (update) o["update"] = true;
-    appendToMonth(ym, json::serialize(o), false, nullptr);
+    appendToMonth(ym, json::serialize(o));
     if (sync_) sync_->deleteKeys.insert(dkey);
     return true;
 }
@@ -489,9 +489,9 @@ Event Store::addEvent(const std::string& event_datetime, const std::string& subj
     e.people = std::move(people);
     e.volume = std::move(volume);
     e.comment = std::move(comment);
-    int ym = yyyymmOf(e.edit_datetime);
+    int ym = yyyymmOf(e.event_datetime);
     ensureCanonicalHeader(ym);
-    appendToMonth(ym, eventToLine(e), false, nullptr);
+    appendToMonth(ym, eventToLine(e));
     applyEventToState(e);
     return e;
 }
@@ -833,19 +833,30 @@ void Store::syncApply(const SyncBlob& b, bool replaceLists, std::set<std::string
     if (b.kind == "event-tail") {
         if (!sync_) return;
         int month = b.month;
-        Schema cur = canonicalSchema();
+	bool header_received = false;
+        Schema cur;
         forEachValue(b.data, [&](const json::value& v, std::string_view raw){
             if (v.is_object()) {
                 auto& o = v.as_object();
                 if (o.if_contains("header")) {
                     Schema s = schemaFromHeader(o);
-                    cur = s;
-                    auto it = monthSchema_.find(month);
-                    if (it == monthSchema_.end() || it->second != s)
-                        appendToMonth(month, std::string(raw), true, &s);
+                    cur = s; header_received = true;
+		    auto &last = monthSchema_[month];
+		    if (last != s) {
+                        appendToMonth(month, std::string(raw));
+			last = s;
+		    }
                     return;
                 }
                 if (o.if_contains("delete")) {
+		    if (!header_received) {
+			cur = canonicalSchema();
+			auto &last = monthSchema_[month];
+			if (last != cur) {
+			    appendToMonth(month, canonicalHeaderLine());
+			    last = cur;
+			}
+		    }
                     RecRef tgt = parseRef(o.at("delete").as_array(), cur.reference);
                     auto mt = sync_->dnMap.find(tgt.dn);
                     if (mt == sync_->dnMap.end()) return;               // DN не в map
@@ -865,7 +876,7 @@ void Store::syncApply(const SyncBlob& b, bool replaceLists, std::set<std::string
                             out.at("this").as_array()[rIdx] = (ma != sync_->dnMap.end()) ? ma->second : a.dn;
                         }
                     }
-                    appendToMonth(month, json::serialize(out), false, nullptr);
+                    appendToMonth(month, json::serialize(out));
                     applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn));
                     sync_->received++;
                     return;
@@ -873,6 +884,14 @@ void Store::syncApply(const SyncBlob& b, bool replaceLists, std::set<std::string
                 return;
             }
             if (v.is_array()) {
+		if (!header_received) {
+		    cur = canonicalSchema();
+		    auto &last = monthSchema_[month];
+		    if (last != cur) {
+			appendToMonth(month, canonicalHeaderLine());
+			last = cur;
+		    }
+		}
                 int dnIdx = -1;
                 for (size_t i = 0; i < cur.columns.size(); ++i) if (cur.columns[i] == "dev_no") dnIdx = (int)i;
                 if (dnIdx < 0) return;
@@ -885,7 +904,7 @@ void Store::syncApply(const SyncBlob& b, bool replaceLists, std::set<std::string
                 if (knownEvent(e.key())) return;                        // уже есть/удалено
                 json::array outA = v.as_array();
                 if (dnIdx < (int)outA.size()) outA[dnIdx] = md;
-                appendToMonth(month, json::serialize(outA), false, nullptr);
+                appendToMonth(month, json::serialize(outA));
                 applyEventToState(e);
                 sync_->received++;
             }

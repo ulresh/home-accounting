@@ -145,7 +145,7 @@ private:
     void saveDevices();
 
     // Низкоуровневая дозапись строки в месячный файл (+ учёт схемы/наличия).
-    void appendToMonth(int yyyymm, const std::string& line, bool isHeader, const Schema* sch);
+    void appendToMonth(int yyyymm, const std::string& line);
     // Перед записью НАШЕЙ строки убедиться, что действует наша каноническая схема.
     void ensureCanonicalHeader(int yyyymm);
     // Записать строку удаления (target + this + флаг update). Уважает дедуп.
