@@ -594,3 +594,73 @@ JVM на билд-хосте в неюникодной локали кодиро
 Файлы в `/workspace` и на обоих билд-хостах синхронизированы; рабочий процесс кросс-теста записан в память.
 
 Примечание: это детерминированная файловая кросс-проверка (формат + кадрирование обмена). Живую TLS-синхронизацию C++↔JVM по сети между хостами я не гонял — при желании могу добавить и такой end-to-end тест, но он сложнее упаковывается в «юнит-тест» и требует сетевой доступности между билд-машинами.
+
+
+
+
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-19 21:03:34 | завершено 2026-06-19 22:06:01 ====
+The remote gradle runs are still draining (several `--no-daemon` invocations queued). I'll wait for the watcher `brt6szjyw` to report. Rather than keep polling, I'll let it notify on completion.
+
+Status so far this turn:
+- **Desktop: fully done and green** — streaming block file reader (no whole-file loads), async cancellable sync via boost.asio C++20 coroutines (cancel interrupts any await point: accept/handshake/read/write), streaming disk→net send and net→parser receive, peer-state index (`sync/DN.jsonl` now holds `[yyyymm, offset]` = what the peer has of our files, plus a list-manifest exchange). All 41 unit tests pass (incl. cancel-during-accept and cancel-during-exchange), GUI cancel harness green, and the cross-format codec self-check 14/14. Your appbuild edits to Store.h/.cpp were adopted as the baseline.
+- **Android: ported and compiles** — `JsonlByteSplitter` (true incremental block parsing over UTF-8 bytes, no whole-file in memory; no new JSON dependency needed), streaming `stateOf`, streaming send (file blocks → socket) and receive (socket blocks → incremental parser), manifest exchange, peer-offset index, and cancel-anywhere via closing the active socket (interrupts any blocked read/write/accept). Client-cancel wired into the sync dialog. `assembleDebug`/test compile succeeded.
+
+Waiting on the Android unit-test run (StoreSyncTest incl. new cancel test + XCompatTest) to confirm green, then I'll run the desktop↔Android cross-platform fixtures both directions.
+
+
+
+
+==== CLAUDE folder=home-accounting session=develop sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-19 22:10:25 | завершено 2026-06-19 22:17:47 ====
+The gradle run is bounded by the 240s timeout now, so it will definitively finish. I'll wait for the completion notification rather than polling further.
+
+Summary of the diagnosis and fix while we wait:
+
+**You were right — the tests were hung** (not slow). The server thread was spinning at ~98% CPU in `recvItems`, stuck 17 minutes. Two bugs, both Android-only:
+
+1. **The real cause:** a fresh client has no `people.jsonl`/`catalog.jsonl`, but `syncPlanOutgoing` still emitted a zero-length `people-data` item. Android's `sendItems` did `it.path.inputStream()` on the **missing file → exception** → the client aborted *before flushing*, closing the socket with nothing sent. (Desktop's C++ `ifstream` tolerates a missing file, which is why desktop's 41 tests passed.)
+2. **Why it hung instead of erroring:** the server's `recvItems` hit immediate EOF, and `readLine` returned `""` at EOF, so `if (line.isEmpty()) continue` **busy-looped forever**.
+
+Fixes applied: `sendItems` now skips opening empty/missing files (`fileLen > 0 && exists()`), and `readLine` now **throws on EOF** instead of returning `""`, so a premature close surfaces as an error rather than an infinite loop. Re-running now under a hard `timeout 240`.
+
+
+
+
+==== CLAUDE folder=home-accounting session=develop sessionId=- | отправлено 2026-06-19 22:20:23 | завершено 2026-06-19 22:20:23 ====
+
+
+
+
+
+==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=b2e9adeb-a99e-4595-adf3-2ff58fa90ee2 | отправлено 2026-06-19 22:21:52 | завершено 2026-06-19 22:22:14 ====
+Ты прав — это классическая ловушка `pgrep -f`.
+
+Сейчас **никакого реального теста не выполняется**. Нет ни одного процесса `gradle` или `testDebugUnitTest`. Единственное, что нашёл `pgrep`, — это сам себя:
+
+```
+3605572 /bin/zsh -c ... eval 'pgrep -af testDebugUnitTest; ...'
+```
+
+`pgrep -f` сопоставляет шаблон со **всей командной строкой** процесса. А оболочка, которая запускает мою команду, содержит строку `testDebugUnitTest` прямо в тексте `eval`. Поэтому pgrep видит этот zsh-обёртку и считает её совпадением. То есть да — он находит самого себя (точнее, шелл, который его же и запустил).
+
+Как это лечится, если нужно реально проверять, идёт ли сборка:
+
+1. **Антисамосовпадение через класс символов:**
+   ```sh
+   pgrep -af '[t]estDebugUnitTest'
+   ```
+   Шаблон `[t]estDebugUnitTest` совпадает со строкой `testDebugUnitTest`, но сама командная строка pgrep содержит `[t]est...`, а не `test...`, поэтому себя не ловит.
+
+2. **Искать по конкретному процессу, а не по подстроке** — например, java-процесс gradle worker:
+   ```sh
+   pgrep -af 'GradleWorkerMain'
+   ```
+
+3. **Исключать свой PID/родителя** или фильтровать `grep -v` по характерным признакам обёртки.
+
+Хочешь — могу заменить проверку в нашем build-workflow на вариант с `[t]estDebugUnitTest`, чтобы мониторинг сборки перестал давать ложные срабатывания.
+
+
+
+
+==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-19 22:24:12 | завершено 2026-06-19 22:25:14 ====
+You've hit your session limit · resets 9pm (UTC)
