@@ -4,6 +4,10 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/json.hpp>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
@@ -14,14 +18,17 @@
 #include <random>
 #include <stdexcept>
 #include <atomic>
-#include <thread>
-#include <chrono>
+#include <mutex>
+#include <memory>
+#include <fstream>
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 namespace asio = boost::asio;
 namespace ssl  = boost::asio::ssl;
 namespace json = boost::json;
+namespace fs   = std::filesystem;
 using tcp = asio::ip::tcp;
 using SslStream = ssl::stream<tcp::socket>;
 
@@ -46,7 +53,6 @@ PairInfo PairInfo::fromJson(const std::string& s) {
     return p;
 }
 
-// ---------- общие помощники ----------
 namespace {
 
 std::string randomCode(int n) {
@@ -75,34 +81,6 @@ std::string localIPv4() {
     return result;
 }
 
-void writeLine(SslStream& s, const std::string& line) {
-    std::string out = line;
-    out.push_back('\n');
-    asio::write(s, asio::buffer(out));
-}
-
-std::string readLine(SslStream& s, asio::streambuf& buf) {
-    asio::read_until(s, buf, '\n');
-    std::istream is(&buf);
-    std::string line;
-    std::getline(is, line);
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    return line;
-}
-
-// Прочитать ровно n байт (хвост блока передаётся «без разбора»).
-std::string readExact(SslStream& s, asio::streambuf& buf, std::size_t n) {
-    while (buf.size() < n) {
-        boost::system::error_code ec;
-        asio::read(s, buf, asio::transfer_at_least(n - buf.size()), ec);
-        if (ec) { if (buf.size() < n) throw std::runtime_error("short read"); break; }
-    }
-    auto begin = asio::buffers_begin(buf.data());
-    std::string out(begin, begin + n);
-    buf.consume(n);
-    return out;
-}
-
 std::string peerPubkey(SslStream& s) {
     X509* cert = SSL_get1_peer_certificate(s.native_handle());
     if (!cert) return "";
@@ -116,52 +94,6 @@ std::string peerPubkey(SslStream& s) {
     try { return crypto::publicKeyFromCertPem(pem); } catch (...) { return ""; }
 }
 
-// Отдать набор блоков: заголовок-строка + сырые данные + '\n'. Завершить ["end"].
-void sendBlobs(SslStream& s, const std::vector<SyncBlob>& blobs) {
-    for (auto& b : blobs) {
-        json::array h;
-        if (b.kind == "event-tail") {
-            h.emplace_back("event-tail");
-            h.emplace_back(b.month);
-            h.emplace_back((int64_t)b.offset);
-            h.emplace_back((int64_t)b.data.size());
-        } else {
-            h.emplace_back(b.kind);
-            h.emplace_back((int64_t)b.data.size());
-        }
-        writeLine(s, json::serialize(h));
-        std::string payload = b.data;
-        payload.push_back('\n');
-        asio::write(s, asio::buffer(payload));
-    }
-    writeLine(s, "[\"end\"]");
-}
-
-// Принять блоки до ["end"], каждый сразу применить к store.
-void recvBlobs(SslStream& s, asio::streambuf& buf, Store& store,
-               bool replaceLists, std::set<std::string>* added) {
-    for (;;) {
-        std::string line = readLine(s, buf);
-        if (line.empty()) continue;
-        json::value v = json::parse(line);
-        auto& a = v.as_array();
-        std::string kind = std::string(a[0].as_string());
-        if (kind == "end") break;
-        SyncBlob b; b.kind = kind;
-        long long size = 0;
-        if (kind == "event-tail") {
-            b.month  = (int)a[1].as_int64();
-            b.offset = a[2].as_int64();
-            size     = a[3].as_int64();
-        } else {
-            size = a[1].as_int64();
-        }
-        b.data = readExact(s, buf, (std::size_t)size);
-        readExact(s, buf, 1);            // завершающий '\n'
-        store.syncApply(b, replaceLists, added);
-    }
-}
-
 void configureContext(ssl::context& ctx, Store& store) {
     ctx.set_verify_mode(ssl::verify_peer);
     ctx.set_verify_callback([](bool, ssl::verify_context&) { return true; });
@@ -169,29 +101,157 @@ void configureContext(ssl::context& ctx, Store& store) {
     ctx.use_private_key_file(store.keyPath().string(), ssl::context::pem);
 }
 
+// ---- асинхронные помощники (всё через co_await — прерываются закрытием сокета) ----
+asio::awaitable<std::string> aReadLine(SslStream& s, std::string& rbuf) {
+    std::size_t nl;
+    while ((nl = rbuf.find('\n')) == std::string::npos) {
+        char tmp[4096];
+        std::size_t n = co_await s.async_read_some(asio::buffer(tmp), asio::use_awaitable);
+        rbuf.append(tmp, n);
+    }
+    std::string line = rbuf.substr(0, nl);
+    rbuf.erase(0, nl + 1);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    co_return line;
+}
+
+// Прочитать ровно count байт, отдавая их блоками в sink сразу (без накопления).
+asio::awaitable<void> aReadToSink(SslStream& s, std::string& rbuf, std::size_t count,
+                                  std::function<void(const char*, std::size_t)> sink) {
+    if (!rbuf.empty()) {
+        std::size_t take = std::min(count, rbuf.size());
+        if (take) { sink(rbuf.data(), take); rbuf.erase(0, take); count -= take; }
+    }
+    char block[16384];
+    while (count > 0) {
+        std::size_t want = std::min(count, sizeof(block));
+        std::size_t got = co_await s.async_read_some(asio::buffer(block, want), asio::use_awaitable);
+        sink(block, got);
+        count -= got;
+    }
+}
+
+asio::awaitable<void> aWrite(SslStream& s, std::string data) {
+    co_await asio::async_write(s, asio::buffer(data), asio::use_awaitable);
+}
+asio::awaitable<void> aWriteLine(SslStream& s, std::string line) {
+    line.push_back('\n');
+    co_await asio::async_write(s, asio::buffer(line), asio::use_awaitable);
+}
+
+// Прочитать файл [from, from+len) блоками и сразу слать в сеть (без накопления).
+asio::awaitable<void> aStreamFile(SslStream& s, fs::path path, long long from, long long len) {
+    std::ifstream in(path, std::ios::binary);
+    if (in) in.seekg(from);
+    char block[16384];
+    long long remaining = len;
+    while (remaining > 0 && in) {
+        std::streamsize want = (std::streamsize)std::min<long long>(remaining, (long long)sizeof(block));
+        in.read(block, want);
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got), asio::use_awaitable);
+        remaining -= got;
+    }
+}
+
+asio::awaitable<void> aSendItems(SslStream& s, std::vector<SyncSendItem> items) {
+    for (auto& it : items) {
+        json::array h;
+        if (it.kind == "event-tail") {
+            h.emplace_back("event-tail"); h.emplace_back(it.month);
+            h.emplace_back((int64_t)it.offset); h.emplace_back((int64_t)it.frameSize());
+        } else {
+            h.emplace_back(it.kind); h.emplace_back((int64_t)it.frameSize());
+        }
+        co_await aWriteLine(s, json::serialize(h));
+        if (!it.prepend.empty()) co_await aWrite(s, it.prepend);
+        co_await aStreamFile(s, it.path, it.fileFrom, it.fileLen);
+        co_await aWrite(s, "\n");
+    }
+    co_await aWriteLine(s, "[\"end\"]");
+}
+
+asio::awaitable<void> aRecvItems(SslStream& s, std::string& rbuf, Store& store, bool replaceLists) {
+    for (;;) {
+        std::string line = co_await aReadLine(s, rbuf);
+        if (line.empty()) continue;
+        json::value v = json::parse(line);
+        auto& a = v.as_array();
+        std::string kind = std::string(a[0].as_string());
+        if (kind == "end") break;
+        int month = 0; long long size = 0;
+        if (kind == "event-tail") { month = (int)a[1].as_int64(); size = a[3].as_int64(); }
+        else size = a[1].as_int64();
+        store.syncRecvBegin(kind, month, replaceLists);
+        co_await aReadToSink(s, rbuf, (std::size_t)size,
+            [&store](const char* d, std::size_t n){ store.syncRecvFeed(d, n); });
+        store.syncRecvFinish();
+        co_await aReadToSink(s, rbuf, 1, [](const char*, std::size_t){});   // завершающий '\n'
+    }
+}
+
+// ---- манифест справочников ----
+std::string manifestJson(const ListManifest& m) {
+    auto arr = [](const FileState& f){ json::array a; a.emplace_back((int64_t)f.size); a.emplace_back(f.sha1); return a; };
+    json::object inner;
+    inner["people"]  = arr(m.people);
+    inner["catalog"] = arr(m.catalog);
+    inner["device"]  = arr(m.device);
+    json::object o; o["manifest"] = std::move(inner);
+    return json::serialize(o);
+}
+ListManifest manifestParse(const std::string& line) {
+    ListManifest m;
+    try {
+        auto v = json::parse(line);
+        auto& mo = v.as_object().at("manifest").as_object();
+        auto rd = [&](const char* k, FileState& f){
+            if (auto* p = mo.if_contains(k)) {
+                auto& a = p->as_array();
+                if (a.size() >= 2) { f.size = a[0].as_int64(); f.sha1 = std::string(a[1].as_string()); }
+            }
+        };
+        rd("people", m.people); rd("catalog", m.catalog); rd("device", m.device);
+    } catch (...) {}
+    return m;
+}
+
+std::string summaryLine(int received) {
+    return json::serialize(json::object{{"summary", json::object{{"received", received}}}});
+}
+int summaryReceived(const std::string& line) {
+    return (int)json::parse(line).as_object().at("summary").as_object().at("received").as_int64();
+}
+
 } // namespace
 
-// ---------- SyncServer ----------
+// ============================================================
+//                          SyncServer
+// ============================================================
 struct SyncServer::Impl {
     Store& store;
     asio::io_context io;
+    ssl::context ctx;
     tcp::acceptor acceptor;
+    std::shared_ptr<SslStream> stream;
+    std::mutex mtx;
     std::string code;
     int port = 0;
     std::atomic<bool> cancelled{false};
-    Impl(Store& s) : store(s), acceptor(io) {}
+    Impl(Store& s) : store(s), ctx(ssl::context::tls_server), acceptor(io) {}
 };
 
 SyncServer::SyncServer(Store& store) : d_(std::make_unique<Impl>(store)) {}
 SyncServer::~SyncServer() = default;
 
 PairInfo SyncServer::listen() {
+    configureContext(d_->ctx, d_->store);
     tcp::endpoint ep(tcp::v4(), 0);
     d_->acceptor.open(ep.protocol());
     d_->acceptor.set_option(tcp::acceptor::reuse_address(true));
     d_->acceptor.bind(ep);
     d_->acceptor.listen();
-    d_->acceptor.non_blocking(true);
     d_->port = d_->acceptor.local_endpoint().port();
     d_->code = randomCode(8);
     PairInfo info;
@@ -204,38 +264,29 @@ PairInfo SyncServer::listen() {
 
 void SyncServer::cancel() {
     d_->cancelled = true;
-    boost::system::error_code ec;
-    d_->acceptor.close(ec);
+    // Закрыть acceptor и активный сокет в io-потоке — это прерывает ЛЮБУЮ
+    // ожидающую async-операцию (accept/handshake/read/write).
+    asio::post(d_->io, [this] {
+        boost::system::error_code ec;
+        d_->acceptor.close(ec);
+        std::lock_guard<std::mutex> lk(d_->mtx);
+        if (d_->stream) d_->stream->lowest_layer().close(ec);
+    });
 }
 
-SyncResult SyncServer::wait(ConfirmFn confirm) {
-    SyncResult res;
+namespace {
+asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
+    std::string rbuf;
     try {
-        tcp::socket sock(d_->io);
-        for (;;) {
-            if (d_->cancelled) { res.error = "cancelled"; return res; }
-            boost::system::error_code ec;
-            d_->acceptor.accept(sock, ec);
-            if (!ec) break;
-            if (ec == asio::error::would_block || ec == asio::error::try_again) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-            res.error = d_->cancelled ? "cancelled" : ec.message();
-            return res;
-        }
-        sock.non_blocking(false);
+        tcp::socket sock = co_await d.acceptor.async_accept(asio::use_awaitable);
+        auto stream = std::make_shared<SslStream>(std::move(sock), d.ctx);
+        { std::lock_guard<std::mutex> lk(d.mtx); d.stream = stream; }
+        co_await stream->async_handshake(ssl::stream_base::server, asio::use_awaitable);
 
-        ssl::context ctx(ssl::context::tls_server);
-        configureContext(ctx, d_->store);
-        SslStream stream(std::move(sock), ctx);
-        stream.handshake(ssl::stream_base::server);
-
-        std::string peer = peerPubkey(stream);
+        std::string peer = peerPubkey(*stream);
         res.peerPubkey = peer;
-        asio::streambuf buf;
 
-        auto hv = json::parse(readLine(stream, buf));
+        auto hv = json::parse(co_await aReadLine(*stream, rbuf));
         auto& ho = hv.as_object().at("hello").as_object();
         std::string clientDb = std::string(ho.at("db").as_string());
         std::string clientCode = std::string(ho.at("code").as_string());
@@ -243,131 +294,155 @@ SyncResult SyncServer::wait(ConfirmFn confirm) {
         bool clientHasData = ho.if_contains("has_data") && ho.at("has_data").as_bool();
         res.peerDb = clientDb;
 
-        if (clientCode != d_->code) {
-            writeLine(stream, "{\"error\":\"bad_code\"}");
-            res.error = "bad_code"; return res;
+        if (clientCode != d.code) { co_await aWriteLine(*stream, R"({"error":"bad_code"})"); res.error = "bad_code"; co_return; }
+        if (clientDb != d.store.database()) {
+            json::object e; e["error"] = "db_mismatch"; e["db"] = d.store.database();
+            co_await aWriteLine(*stream, json::serialize(e)); res.error = "db_mismatch"; co_return;
         }
-        if (clientDb != d_->store.database()) {
-            json::object e; e["error"] = "db_mismatch"; e["db"] = d_->store.database();
-            writeLine(stream, json::serialize(e));
-            res.error = "db_mismatch"; return res;
-        }
-        // Разрешение конфликта собственных номеров (меняет ТОЛЬКО одно устройство).
-        if (clientDevNo == d_->store.deviceNo() && !d_->store.hasData() && clientHasData) {
-            d_->store.renumberSelf(std::max(d_->store.maxDeviceNo(), clientDevNo) + 1);
-        }
-        int ackMaxDn = d_->store.maxDeviceNo();
-        if (!d_->store.knowsDevice(peer)) {
-            if (!confirm || !confirm(peer)) {
-                writeLine(stream, "{\"error\":\"rejected\"}");
-                res.error = "rejected"; return res;
-            }
-            d_->store.reserveDeviceNo(peer, clientDevNo, "peer");
+        if (clientDevNo == d.store.deviceNo() && !d.store.hasData() && clientHasData)
+            d.store.renumberSelf(std::max(d.store.maxDeviceNo(), clientDevNo) + 1);
+        int ackMaxDn = d.store.maxDeviceNo();
+        if (!d.store.knowsDevice(peer)) {
+            if (!confirm || !confirm(peer)) { co_await aWriteLine(*stream, R"({"error":"rejected"})"); res.error = "rejected"; co_return; }
+            d.store.reserveDeviceNo(peer, clientDevNo, "peer");
         }
 
         json::object ok;
-        ok["ok"] = true; ok["db"] = d_->store.database();
-        ok["device_no"] = d_->store.deviceNo(); ok["pubkey"] = d_->store.myPubkey();
+        ok["ok"] = true; ok["db"] = d.store.database();
+        ok["device_no"] = d.store.deviceNo(); ok["pubkey"] = d.store.myPubkey();
         ok["max_dn"] = ackMaxDn;
-        writeLine(stream, json::serialize(ok));
+        co_await aWriteLine(*stream, json::serialize(ok));
 
-        // ----- инкрементный обмен файлами -----
-        int peerLocal = d_->store.reserveDeviceNo(peer, clientDevNo, "peer");
-        d_->store.syncBegin(peerLocal);
-        recvBlobs(stream, buf, d_->store, /*replaceLists=*/false, nullptr);  // принять и слить
-        d_->store.syncDedup();                                              // убрать дубликаты
-        sendBlobs(stream, d_->store.syncBuildOutgoing(/*forceLists=*/true)); // отдать итог
-        int ks = d_->store.syncReceived();
+        // обмен манифестами справочников (состояние собеседника)
+        co_await aWriteLine(*stream, manifestJson(d.store.listManifest()));
+        ListManifest peerMan = manifestParse(co_await aReadLine(*stream, rbuf));
 
-        writeLine(stream, json::serialize(json::object{{"summary", json::object{{"received", ks}}}}));
-        auto cs = json::parse(readLine(stream, buf));
-        int kc = (int)cs.as_object().at("summary").as_object().at("received").as_int64();
+        int peerLocal = d.store.reserveDeviceNo(peer, clientDevNo, "peer");
+        d.store.syncBegin(peerLocal);
+        co_await aRecvItems(*stream, rbuf, d.store, /*replaceLists=*/false);   // принять и слить
+        d.store.syncDedup();
+        co_await aSendItems(*stream, d.store.syncPlanOutgoing(peerMan));       // отдать (потоково)
+        int ks = d.store.syncReceived();
 
-        d_->store.syncCommit(peerLocal);
-        d_->store.syncEnd();
+        co_await aWriteLine(*stream, summaryLine(ks));
+        int kc = summaryReceived(co_await aReadLine(*stream, rbuf));
 
+        d.store.syncCommit(peerLocal);
+        d.store.syncEnd();
         res.ok = true; res.received = ks; res.sent = kc;
-        boost::system::error_code ec;
-        stream.shutdown(ec);
+        boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
-        d_->store.syncEnd();
-        res.ok = false;
-        if (res.error.empty()) res.error = e.what();
+        d.store.syncEnd();
+        if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
     }
+    co_return;
+}
+} // namespace
+
+SyncResult SyncServer::wait(ConfirmFn confirm) {
+    SyncResult res;
+    asio::co_spawn(d_->io, serverProtocol(*d_, confirm, res), asio::detached);
+    d_->io.run();
+    if (!res.ok && res.error.empty() && d_->cancelled) res.error = "cancelled";
     return res;
 }
 
-// ---------- SyncClient ----------
-SyncClient::SyncClient(Store& store) : store_(store) {}
+// ============================================================
+//                          SyncClient
+// ============================================================
+struct SyncClient::Impl {
+    Store& store;
+    asio::io_context io;
+    ssl::context ctx;
+    std::shared_ptr<SslStream> stream;
+    std::mutex mtx;
+    std::atomic<bool> cancelled{false};
+    Impl(Store& s) : store(s), ctx(ssl::context::tls_client) {}
+};
 
-SyncResult SyncClient::connect(const PairInfo& info, ConfirmFn confirm) {
-    SyncResult res;
+SyncClient::SyncClient(Store& store) : d_(std::make_unique<Impl>(store)) {}
+SyncClient::~SyncClient() = default;
+
+void SyncClient::cancel() {
+    d_->cancelled = true;
+    asio::post(d_->io, [this] {
+        boost::system::error_code ec;
+        std::lock_guard<std::mutex> lk(d_->mtx);
+        if (d_->stream) d_->stream->lowest_layer().close(ec);
+    });
+}
+
+namespace {
+asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, ConfirmFn confirm, SyncResult& res) {
+    std::string rbuf;
     try {
-        asio::io_context io;
-        tcp::socket sock(io);
+        tcp::socket sock(d.io);
         tcp::endpoint ep(asio::ip::make_address(info.ip), (unsigned short)info.port);
-        sock.connect(ep);
+        co_await sock.async_connect(ep, asio::use_awaitable);
+        auto stream = std::make_shared<SslStream>(std::move(sock), d.ctx);
+        { std::lock_guard<std::mutex> lk(d.mtx); d.stream = stream; }
+        co_await stream->async_handshake(ssl::stream_base::client, asio::use_awaitable);
 
-        ssl::context ctx(ssl::context::tls_client);
-        configureContext(ctx, store_);
-        SslStream stream(std::move(sock), ctx);
-        stream.handshake(ssl::stream_base::client);
-
-        std::string peer = peerPubkey(stream);
+        std::string peer = peerPubkey(*stream);
         res.peerPubkey = peer;
-        asio::streambuf buf;
 
         json::object hello;
-        hello["db"] = store_.database();
-        hello["device_no"] = store_.deviceNo();
-        hello["pubkey"] = store_.myPubkey();
+        hello["db"] = d.store.database();
+        hello["device_no"] = d.store.deviceNo();
+        hello["pubkey"] = d.store.myPubkey();
         hello["code"] = info.code;
-        hello["has_data"] = store_.hasData();
-        writeLine(stream, json::serialize(json::object{{"hello", hello}}));
+        hello["has_data"] = d.store.hasData();
+        json::object helloMsg; helloMsg["hello"] = std::move(hello);
+        co_await aWriteLine(*stream, json::serialize(helloMsg));
 
-        auto av = json::parse(readLine(stream, buf));
+        auto av = json::parse(co_await aReadLine(*stream, rbuf));
         auto& ao = av.as_object();
         if (auto* err = ao.if_contains("error")) {
             res.error = std::string(err->as_string());
             if (auto* db = ao.if_contains("db")) res.peerDb = std::string(db->as_string());
-            return res;
+            co_return;
         }
         res.peerDb = std::string(ao.at("db").as_string());
-
         int serverDevNo = ao.if_contains("device_no") ? (int)ao.at("device_no").as_int64() : 0;
         int serverMaxDn = ao.if_contains("max_dn") ? (int)ao.at("max_dn").as_int64() : serverDevNo;
-        if (serverDevNo == store_.deviceNo() && !store_.hasData()) {
-            store_.renumberSelf(std::max(store_.maxDeviceNo(), serverMaxDn) + 1);
+        if (serverDevNo == d.store.deviceNo() && !d.store.hasData())
+            d.store.renumberSelf(std::max(d.store.maxDeviceNo(), serverMaxDn) + 1);
+        if (!d.store.knowsDevice(peer)) {
+            if (!confirm || !confirm(peer)) { res.error = "rejected"; co_return; }
+            d.store.reserveDeviceNo(peer, serverDevNo, "peer");
         }
 
-        if (!store_.knowsDevice(peer)) {
-            if (!confirm || !confirm(peer)) { res.error = "rejected"; return res; }
-            store_.reserveDeviceNo(peer, serverDevNo, "peer");
-        }
+        ListManifest serverMan = manifestParse(co_await aReadLine(*stream, rbuf));  // сервер прислал манифест
+        co_await aWriteLine(*stream, manifestJson(d.store.listManifest()));
 
-        // ----- инкрементный обмен файлами -----
-        int peerLocal = store_.reserveDeviceNo(peer, serverDevNo, "peer");
-        store_.syncBegin(peerLocal);
-        sendBlobs(stream, store_.syncBuildOutgoing(/*forceLists=*/false));   // отдать свой хвост
-        recvBlobs(stream, buf, store_, /*replaceLists=*/true, nullptr);      // принять итог как есть
-        store_.syncDedup();
-        int kc = store_.syncReceived();
+        int peerLocal = d.store.reserveDeviceNo(peer, serverDevNo, "peer");
+        d.store.syncBegin(peerLocal);
+        co_await aSendItems(*stream, d.store.syncPlanOutgoing(serverMan));     // отдать (потоково)
+        co_await aRecvItems(*stream, rbuf, d.store, /*replaceLists=*/true);    // принять итог как есть
+        d.store.syncDedup();
+        int kc = d.store.syncReceived();
 
-        auto sv = json::parse(readLine(stream, buf));
-        int ks = (int)sv.as_object().at("summary").as_object().at("received").as_int64();
-        writeLine(stream, json::serialize(json::object{{"summary", json::object{{"received", kc}}}}));
+        int ks = summaryReceived(co_await aReadLine(*stream, rbuf));
+        co_await aWriteLine(*stream, summaryLine(kc));
 
-        store_.syncCommit(peerLocal);
-        store_.syncEnd();
-
+        d.store.syncCommit(peerLocal);
+        d.store.syncEnd();
         res.ok = true; res.received = kc; res.sent = ks;
-        boost::system::error_code ec;
-        stream.shutdown(ec);
+        boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
-        store_.syncEnd();
-        res.ok = false;
-        if (res.error.empty()) res.error = e.what();
+        d.store.syncEnd();
+        if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
     }
+    co_return;
+}
+} // namespace
+
+SyncResult SyncClient::connect(const PairInfo& info, ConfirmFn confirm) {
+    SyncResult res;
+    configureContext(d_->ctx, d_->store);
+    asio::co_spawn(d_->io, clientProtocol(*d_, info, confirm, res), asio::detached);
+    d_->io.run();
+    if (!res.ok && res.error.empty() && d_->cancelled) res.error = "cancelled";
     return res;
 }
 

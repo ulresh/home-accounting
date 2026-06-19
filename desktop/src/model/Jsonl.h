@@ -1,21 +1,18 @@
 #pragma once
 #include <filesystem>
 #include <string>
-#include <string_view>
 #include <functional>
 #include <boost/json/value.hpp>
 
 namespace ha {
 
-// Прочитать файл как последовательность JSON-значений. Границы каждого значения
-// определяет сам парсер (stream_parser), а не перевод строки.
-// raw — исходный текст значения (без окружающих пробелов), действителен только
-// в течение вызова колбэка.
+// Прочитать файл как последовательность JSON-значений. Файл читается БЛОКАМИ
+// фиксированного размера, каждый блок сразу передаётся инкрементному парсеру —
+// целиком в память файл не загружается. Границы значений определяет парсер.
 bool readValues(const std::filesystem::path& p,
-                const std::function<void(const boost::json::value&, std::string_view raw)>& onValue);
+                const std::function<void(const boost::json::value&)>& onValue);
 
 // Дозаписать одну строку (+\n) в конец файла, создав родительские папки.
-// Файлы событий только дозаписываются — никогда не перезаписываются.
 void appendLine(const std::filesystem::path& p, const std::string& line);
 
 // Атомарно перезаписать файл целиком (запись во временный + rename).

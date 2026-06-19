@@ -11,6 +11,7 @@
 #include <sstream>
 #include <fstream>
 #include <iterator>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace json = boost::json;
@@ -58,60 +59,38 @@ static std::string costToStr(double c) {
     return buf;
 }
 
-static std::string sha1hex(const std::string& data) {
-    unsigned char md[EVP_MAX_MD_SIZE]; unsigned int n = 0;
-    EVP_Digest(data.data(), data.size(), md, &n, EVP_sha1(), nullptr);
+static std::string toHex(const unsigned char* md, unsigned n) {
     static const char* H = "0123456789abcdef";
     std::string out; out.reserve(n * 2);
     for (unsigned i = 0; i < n; ++i) { out += H[md[i] >> 4]; out += H[md[i] & 0xF]; }
     return out;
 }
 
-// ---- файловые помощники ----
-static std::string readWhole(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return {};
-    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-}
-static std::string readSlice(const fs::path& p, long long off, long long len) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in || len <= 0) return {};
-    in.seekg(off);
-    std::string s; s.resize((size_t)len);
-    in.read(&s[0], len);
-    s.resize((size_t)in.gcount());
-    return s;
-}
+// ---- файловые помощники (потоковые: файл целиком в память не грузим) ----
+// Размер и SHA1 файла, считая его блоками фиксированного размера.
 static FileState stateOf(const fs::path& p) {
     FileState st;
-    std::string c = readWhole(p);
-    st.size = (long long)c.size();
-    if (!c.empty()) st.sha1 = sha1hex(c);
-    return st;
-}
-
-// Разобрать строковое содержимое как последовательность JSON-значений
-// (границы — парсером, как в readValues, но из памяти).
-static void forEachValue(const std::string& content,
-                         const std::function<void(const json::value&, std::string_view)>& cb) {
-    const char* data = content.data();
-    std::size_t n = content.size(), pos = 0;
-    json::stream_parser sp;
-    while (pos < n) {
-        while (pos < n && (unsigned char)data[pos] <= ' ') ++pos;
-        if (pos >= n) break;
-        sp.reset();
-        boost::system::error_code ec;
-        std::size_t consumed = sp.write_some(data + pos, n - pos, ec);
-        if (ec) break;
-        std::size_t start = pos;
-        pos += consumed;
-        if (!sp.done()) break;
-        json::value v = sp.release();
-        std::size_t end = pos;
-        while (end > start && (unsigned char)data[end - 1] <= ' ') --end;
-        cb(v, std::string_view(data + start, end - start));
+    std::ifstream in(p, std::ios::binary);
+    if (!in.is_open()) return st;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr);
+    std::vector<char> block(64 * 1024);
+    long long total = 0; bool any = false;
+    while (in) {
+        in.read(block.data(), (std::streamsize)block.size());
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        EVP_DigestUpdate(ctx, block.data(), (size_t)got);
+        total += got; any = true;
     }
+    st.size = total;
+    if (any) {
+        unsigned char md[EVP_MAX_MD_SIZE]; unsigned int n = 0;
+        EVP_DigestFinal_ex(ctx, md, &n);
+        st.sha1 = toHex(md, n);
+    }
+    EVP_MD_CTX_free(ctx);
+    return st;
 }
 
 // ---- схемы ----
@@ -120,8 +99,7 @@ static Schema canonicalSchema() {
         {"event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"},
         {"edit_datetime","rec_no","dev_no"}};
 }
-static std::string canonicalHeaderLine() {
-    Schema s = canonicalSchema();
+static std::string headerLineFor(const Schema& s) {
     json::object o;
     json::array cols, ref;
     for (auto& c : s.columns) cols.emplace_back(c);
@@ -130,6 +108,7 @@ static std::string canonicalHeaderLine() {
     o["reference"] = std::move(ref);
     return json::serialize(o);
 }
+static std::string canonicalHeaderLine() { return headerLineFor(canonicalSchema()); }
 static Schema schemaFromHeader(const json::object& o) {
     Schema s;
     if (auto* h = o.if_contains("header"))
@@ -255,10 +234,10 @@ void Store::load() {
 
 void Store::loadConfig() {
     std::vector<std::string> dbs;
-    readValues(root_ / "database.jsonl", [&](const json::value& v, std::string_view){
+    readValues(root_ / "database.jsonl", [&](const json::value& v){
         if (v.is_string()) dbs.push_back(std::string(v.as_string()));
     });
-    readValues(root_ / "config.json", [&](const json::value& v, std::string_view){
+    readValues(root_ / "config.json", [&](const json::value& v){
         if (!v.is_object()) return;
         auto& o = v.as_object();
         if (auto* d = o.if_contains("current_database")) db_ = std::string(d->as_string());
@@ -284,7 +263,7 @@ void Store::setFontSize(int pt) { fontSize_ = pt; saveConfig(); }
 
 std::vector<std::string> Store::databases() const {
     std::vector<std::string> dbs;
-    readValues(root_ / "database.jsonl", [&](const json::value& v, std::string_view){
+    readValues(root_ / "database.jsonl", [&](const json::value& v){
         if (v.is_string()) dbs.push_back(std::string(v.as_string()));
     });
     if (dbs.empty()) dbs.push_back(db_);
@@ -313,7 +292,7 @@ void Store::switchDatabase(const std::string& name, bool create) {
 
 void Store::loadDevices() {
     devices_.clear();
-    readValues(dbDir() / "device.jsonl", [&](const json::value& v, std::string_view){
+    readValues(dbDir() / "device.jsonl", [&](const json::value& v){
         try {
             auto& a = v.as_array();
             Device d;
@@ -339,7 +318,7 @@ void Store::saveDevices() {
 
 void Store::loadPeople() {
     people_.clear();
-    readValues(dbDir() / "people.jsonl", [&](const json::value& v, std::string_view){
+    readValues(dbDir() / "people.jsonl", [&](const json::value& v){
         if (v.is_string()) people_.push_back(std::string(v.as_string()));
     });
 }
@@ -351,7 +330,7 @@ void Store::savePeople() {
 
 void Store::loadCatalog() {
     catalog_.clear();
-    readValues(dbDir() / "catalog.jsonl", [&](const json::value& v, std::string_view){
+    readValues(dbDir() / "catalog.jsonl", [&](const json::value& v){
         try {
             auto& a = v.as_array();
             if (a.empty()) return;
@@ -378,8 +357,7 @@ void Store::loadEvents() {
     for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
         Schema cur = canonicalSchema();
         bool sawHeader = false;
-        readValues(path, [&](const json::value& v, std::string_view raw){
-            (void)raw;
+        readValues(path, [&](const json::value& v){
             if (v.is_object()) {
                 auto& o = v.as_object();
                 if (o.if_contains("header")) { cur = schemaFromHeader(o); monthSchema_[yyyymm] = cur; sawHeader = true; }
@@ -665,40 +643,30 @@ void Store::renumberSelf(int newNo) {
 //                      Инкрементная синхронизация
 // =====================================================================
 
-std::map<std::string, FileState> Store::fileStates() const {
-    std::map<std::string, FileState> st;
-    st["device"]  = stateOf(dbDir() / "device.jsonl");
-    st["people"]  = stateOf(dbDir() / "people.jsonl");
-    st["catalog"] = stateOf(dbDir() / "catalog.jsonl");
-    for (auto& [yyyymm, path] : enumerateMonths(dbDir()))
-        st[std::to_string(yyyymm)] = stateOf(path);
-    return st;
+ListManifest Store::listManifest() const {
+    ListManifest m;
+    m.people  = stateOf(dbDir() / "people.jsonl");
+    m.catalog = stateOf(dbDir() / "catalog.jsonl");
+    m.device  = stateOf(dbDir() / "device.jsonl");
+    return m;
 }
 
-std::map<std::string, FileState> Store::loadSyncIndex(int peerDn) const {
-    std::map<std::string, FileState> st;
-    readValues(syncIndexPath(peerDn), [&](const json::value& v, std::string_view){
+// Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего месячного
+// файла у него уже есть. (Старые записи со строковым ключом / sha игнорируем.)
+std::map<int, long long> Store::loadSyncIndex(int peerDn) const {
+    std::map<int, long long> off;
+    readValues(syncIndexPath(peerDn), [&](const json::value& v){
         if (!v.is_array()) return;
         auto& a = v.as_array();
-        if (a.size() < 2) return;
-        std::string key = a[0].is_string() ? std::string(a[0].as_string())
-                                           : std::to_string(asInt(a[0]));
-        FileState fsr;
-        fsr.size = (long long)asInt(a[1]);
-        if (a.size() > 2 && a[2].is_string()) fsr.sha1 = std::string(a[2].as_string());
-        st[key] = fsr;
+        if (a.size() < 2 || !(a[0].is_int64() || a[0].is_uint64())) return;
+        off[asInt(a[0])] = (long long)asInt(a[1]);
     });
-    return st;
+    return off;
 }
-void Store::saveSyncIndex(int peerDn, const std::map<std::string, FileState>& st) const {
+void Store::saveSyncIndex(int peerDn, const std::map<int, long long>& off) const {
     std::string content;
-    for (auto& [key, fsr] : st) {
-        json::array a;
-        bool digits = !key.empty() && std::all_of(key.begin(), key.end(), ::isdigit);
-        if (digits) a.emplace_back((int64_t)std::atoll(key.c_str()));
-        else        a.emplace_back(key);
-        a.emplace_back((int64_t)fsr.size);
-        a.emplace_back(fsr.sha1);
+    for (auto& [month, o] : off) {
+        json::array a; a.emplace_back((int64_t)month); a.emplace_back((int64_t)o);
         content += json::serialize(a) + "\n";
     }
     writeAtomic(syncIndexPath(peerDn), content);
@@ -707,7 +675,7 @@ void Store::saveSyncIndex(int peerDn, const std::map<std::string, FileState>& st
 void Store::syncBegin(int peerDn) {
     sync_ = std::make_unique<SyncSession>();
     sync_->peerDn = peerDn;
-    sync_->baseline = loadSyncIndex(peerDn);
+    sync_->offsets = loadSyncIndex(peerDn);
 }
 void Store::syncEnd() { sync_.reset(); }
 
@@ -716,7 +684,7 @@ void Store::ensureDeleteKeysLoaded() {
     for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
         (void)yyyymm;
         Schema cur = canonicalSchema();
-        readValues(path, [&](const json::value& v, std::string_view){
+        readValues(path, [&](const json::value& v){
             if (!v.is_object()) return;
             auto& o = v.as_object();
             if (o.if_contains("header")) { cur = schemaFromHeader(o); return; }
@@ -730,186 +698,179 @@ void Store::ensureDeleteKeysLoaded() {
     sync_->deleteKeysLoaded = true;
 }
 
-// действующий заголовок в файле на смещении offset (последний header до offset).
-static std::string inEffectHeaderAt(const fs::path& path, long long offset) {
-    std::string prefix = readSlice(path, 0, offset);
-    std::string last;
-    std::size_t pos = 0;
-    while (pos < prefix.size()) {
-        std::size_t nl = prefix.find('\n', pos);
-        std::string line = prefix.substr(pos, (nl == std::string::npos ? prefix.size() : nl) - pos);
-        if (line.find("\"header\"") != std::string::npos) {
-            try { auto v = json::parse(line); if (v.is_object() && v.as_object().if_contains("header")) last = line; }
-            catch (...) {}
-        }
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
+std::string Store::inEffectHeader(int yyyymm) const {
+    auto it = monthSchema_.find(yyyymm);
+    if (it == monthSchema_.end()) return canonicalHeaderLine();
+    return headerLineFor(it->second);
+}
+
+// Что отправить партнёру (только планы — данные в память не накапливаем).
+// Справочники шлём, только если у партнёра другая версия (его манифест);
+// события — хвостом от offset, который у партнёра уже есть.
+std::vector<SyncSendItem> Store::syncPlanOutgoing(const ListManifest& peer) const {
+    std::vector<SyncSendItem> out;
+    // device-data — всегда (получателю нужен наш список устройств для DN-map).
+    out.push_back(SyncSendItem{"device-data", 0, 0, "", dbDir() / "device.jsonl", 0,
+                               stateOf(dbDir() / "device.jsonl").size});
+    {
+        FileState me = stateOf(dbDir() / "people.jsonl");
+        if (me.size != peer.people.size || me.sha1 != peer.people.sha1)
+            out.push_back(SyncSendItem{"people-data", 0, 0, "", dbDir() / "people.jsonl", 0, me.size});
     }
-    return last.empty() ? canonicalHeaderLine() : last;
-}
-
-static bool stateChanged(const std::map<std::string, FileState>& base,
-                         const std::map<std::string, FileState>& cur, const std::string& key) {
-    auto c = cur.find(key);
-    FileState cv = (c != cur.end()) ? c->second : FileState{};
-    auto b = base.find(key);
-    if (b == base.end()) return cv.size > 0;
-    return b->second.size != cv.size || b->second.sha1 != cv.sha1;
-}
-
-std::vector<SyncBlob> Store::syncBuildOutgoing(bool forceLists) const {
-    std::vector<SyncBlob> out;
-    auto cur = fileStates();
-    std::map<std::string, FileState> empty;
-    const auto& base = sync_ ? sync_->baseline : empty;
-
-    // device-data всегда (нужно для DN-map у получателя)
-    out.push_back(SyncBlob{"device-data", 0, 0, readWhole(dbDir() / "device.jsonl")});
-
-    if (forceLists || stateChanged(base, cur, "people"))
-        out.push_back(SyncBlob{"people-data", 0, 0, readWhole(dbDir() / "people.jsonl")});
-    if (forceLists || stateChanged(base, cur, "catalog"))
-        out.push_back(SyncBlob{"catalog-data", 0, 0, readWhole(dbDir() / "catalog.jsonl")});
-
+    {
+        FileState me = stateOf(dbDir() / "catalog.jsonl");
+        if (me.size != peer.catalog.size || me.sha1 != peer.catalog.sha1)
+            out.push_back(SyncSendItem{"catalog-data", 0, 0, "", dbDir() / "catalog.jsonl", 0, me.size});
+    }
     for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
-        std::string key = std::to_string(yyyymm);
-        long long baseSize = 0;
-        auto it = base.find(key);
-        if (it != base.end()) baseSize = it->second.size;
+        long long off = 0;
+        if (sync_) { auto it = sync_->offsets.find(yyyymm); if (it != sync_->offsets.end()) off = it->second; }
         long long size = (long long)fs::file_size(path);
-        if (size <= baseSize) continue;
-        std::string data;
-        if (baseSize > 0) data = inEffectHeaderAt(path, baseSize) + "\n";
-        data += readSlice(path, baseSize, size - baseSize);
-        out.push_back(SyncBlob{"event-tail", yyyymm, baseSize, std::move(data)});
+        if (size <= off) continue;
+        SyncSendItem it;
+        it.kind = "event-tail"; it.month = yyyymm; it.offset = off;
+        it.path = path; it.fileFrom = off; it.fileLen = size - off;
+        if (off > 0) it.prepend = inEffectHeader(yyyymm) + "\n";   // самоописываемый хвост
+        out.push_back(std::move(it));
     }
     return out;
 }
 
-// --- применение входящих блоков ---
-void Store::syncApply(const SyncBlob& b, bool replaceLists, std::set<std::string>* addedDevices) {
-    if (b.kind == "device-data") {
-        forEachValue(b.data, [&](const json::value& v, std::string_view){
-            if (!v.is_array()) return;
-            auto& a = v.as_array();
-            if (a.size() < 2 || !a[1].is_string()) return;
-            int peerNo = asInt(a[0]);
-            std::string pub = std::string(a[1].as_string());
-            std::string name = (a.size() > 2 && a[2].is_string()) ? std::string(a[2].as_string()) : "peer";
-            bool isNew = !knowsDevice(pub);
-            int localNo = reserveDeviceNo(pub, peerNo, name);
-            if (isNew && addedDevices) addedDevices->insert(pub);
-            if (sync_) sync_->dnMap[peerNo] = localNo;
-        });
-        return;
+// ---- потоковый приём блока (инкрементно, без накопления всего блока) ----
+void Store::syncRecvBegin(const std::string& kind, int month, bool replaceLists) {
+    if (!sync_) return;
+    sync_->recv = std::make_unique<RecvState>();
+    auto& r = *sync_->recv;
+    r.kind = kind; r.month = month; r.replaceLists = replaceLists;
+    r.cur = canonicalSchema();
+}
+
+void Store::syncRecvFeed(const char* data, std::size_t n) {
+    if (!sync_ || !sync_->recv) return;
+    auto& r = *sync_->recv;
+    const char* p = data; std::size_t rem = n;
+    while (rem > 0) {
+        if (r.atStart) {
+            while (rem > 0 && (unsigned char)*p <= ' ') { ++p; --rem; }
+            if (rem == 0) break;
+            r.atStart = false;
+        }
+        boost::system::error_code ec;
+        std::size_t consumed = r.sp.write_some(p, rem, ec);
+        p += consumed; rem -= consumed;
+        if (ec) { r.sp.reset(); r.atStart = true; break; }
+        if (r.sp.done()) { json::value v = r.sp.release(); handleRecvValue(v); r.sp.reset(); r.atStart = true; }
+        else break;
     }
-    if (b.kind == "people-data") {
-        std::vector<std::string> incoming;
-        forEachValue(b.data, [&](const json::value& v, std::string_view){
-            if (v.is_string()) incoming.push_back(std::string(v.as_string()));
-        });
-        if (replaceLists) { people_ = incoming; savePeople(); }
+}
+
+void Store::syncRecvFinish() {
+    if (!sync_ || !sync_->recv) return;
+    auto& r = *sync_->recv;
+    if (r.kind == "people-data") {
+        if (r.replaceLists) { people_ = r.people; savePeople(); }
         else {
             bool ch = false;
-            for (auto& p : incoming)
+            for (auto& p : r.people)
                 if (std::find(people_.begin(), people_.end(), p) == people_.end()) { people_.push_back(p); ch = true; }
             if (ch) savePeople();
         }
+    } else if (r.kind == "catalog-data") {
+        if (r.replaceLists) { catalog_ = r.catalog; saveCatalog(); }
+        else for (auto& e : r.catalog) upsertCatalog(e);
+    }
+    sync_->recv.reset();
+}
+
+void Store::handleRecvValue(const json::value& v) {
+    auto& r = *sync_->recv;
+    if (r.kind == "device-data") {
+        if (!v.is_array()) return;
+        auto& a = v.as_array();
+        if (a.size() < 2 || !a[1].is_string()) return;
+        int peerNo = asInt(a[0]);
+        std::string pub = std::string(a[1].as_string());
+        std::string name = (a.size() > 2 && a[2].is_string()) ? std::string(a[2].as_string()) : "peer";
+        int localNo = reserveDeviceNo(pub, peerNo, name);
+        sync_->dnMap[peerNo] = localNo;
         return;
     }
-    if (b.kind == "catalog-data") {
-        std::vector<CatalogEntry> incoming;
-        forEachValue(b.data, [&](const json::value& v, std::string_view){
-            if (!v.is_array() || v.as_array().empty()) return;
+    if (r.kind == "people-data") {
+        if (v.is_string()) r.people.push_back(std::string(v.as_string()));
+        return;
+    }
+    if (r.kind == "catalog-data") {
+        if (v.is_array() && !v.as_array().empty()) {
             auto& a = v.as_array();
             CatalogEntry e; e.category = asStr(a[0]);
             for (size_t i = 1; i < a.size(); ++i) e.items.push_back(asStr(a[i]));
-            incoming.push_back(std::move(e));
-        });
-        if (replaceLists) { catalog_ = incoming; saveCatalog(); }
-        else for (auto& e : incoming) upsertCatalog(e);
+            r.catalog.push_back(std::move(e));
+        }
         return;
     }
-    if (b.kind == "event-tail") {
-        if (!sync_) return;
-        int month = b.month;
-	bool header_received = false;
-        Schema cur;
-        forEachValue(b.data, [&](const json::value& v, std::string_view raw){
-            if (v.is_object()) {
-                auto& o = v.as_object();
-                if (o.if_contains("header")) {
-                    Schema s = schemaFromHeader(o);
-                    cur = s; header_received = true;
-		    auto &last = monthSchema_[month];
-		    if (last != s) {
-                        appendToMonth(month, std::string(raw));
-			last = s;
-		    }
-                    return;
-                }
-                if (o.if_contains("delete")) {
-		    if (!header_received) {
-			cur = canonicalSchema();
-			auto &last = monthSchema_[month];
-			if (last != cur) {
-			    appendToMonth(month, canonicalHeaderLine());
-			    last = cur;
-			}
-		    }
-                    RecRef tgt = parseRef(o.at("delete").as_array(), cur.reference);
-                    auto mt = sync_->dnMap.find(tgt.dn);
-                    if (mt == sync_->dnMap.end()) return;               // DN не в map
-                    int tdn = mt->second;
-                    bool upd = o.if_contains("update") && o.at("update").is_bool() && o.at("update").as_bool();
-                    std::string dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (upd ? "1" : "0");
-                    ensureDeleteKeysLoaded();
-                    if (sync_->deleteKeys.count(dkey)) return;          // повтор не вставляем
-                    sync_->deleteKeys.insert(dkey);
-                    int rIdx = refIndexOfDn(cur.reference);
-                    json::object out = o;
-                    if (rIdx >= 0) {
-                        out.at("delete").as_array()[rIdx] = tdn;
-                        if (out.if_contains("this")) {
-                            RecRef a = parseRef(o.at("this").as_array(), cur.reference);
-                            auto ma = sync_->dnMap.find(a.dn);
-                            out.at("this").as_array()[rIdx] = (ma != sync_->dnMap.end()) ? ma->second : a.dn;
-                        }
-                    }
-                    appendToMonth(month, json::serialize(out));
-                    applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn));
-                    sync_->received++;
-                    return;
-                }
-                return;
+    if (r.kind != "event-tail") return;
+    int month = r.month;
+    if (v.is_object()) {
+        auto& o = v.as_object();
+        if (o.if_contains("header")) {
+            Schema s = schemaFromHeader(o);
+            r.cur = s; r.headerReceived = true;
+            auto& last = monthSchema_[month];
+            if (last != s) { appendToMonth(month, headerLineFor(s)); last = s; }
+            return;
+        }
+        if (o.if_contains("delete")) {
+            if (!r.headerReceived) {
+                r.cur = canonicalSchema();
+                auto& last = monthSchema_[month];
+                if (last != r.cur) { appendToMonth(month, canonicalHeaderLine()); last = r.cur; }
             }
-            if (v.is_array()) {
-		if (!header_received) {
-		    cur = canonicalSchema();
-		    auto &last = monthSchema_[month];
-		    if (last != cur) {
-			appendToMonth(month, canonicalHeaderLine());
-			last = cur;
-		    }
-		}
-                int dnIdx = -1;
-                for (size_t i = 0; i < cur.columns.size(); ++i) if (cur.columns[i] == "dev_no") dnIdx = (int)i;
-                if (dnIdx < 0) return;
-                Event e = parseEventArray(v.as_array(), cur);
-                auto m = sync_->dnMap.find(e.dev_no);
-                if (m == sync_->dnMap.end()) return;                    // DN не в map
-                int md = m->second;
-                if (md == deviceNo_) return;                            // эхо своих
-                e.dev_no = md;
-                if (knownEvent(e.key())) return;                        // уже есть/удалено
-                json::array outA = v.as_array();
-                if (dnIdx < (int)outA.size()) outA[dnIdx] = md;
-                appendToMonth(month, json::serialize(outA));
-                applyEventToState(e);
-                sync_->received++;
+            RecRef tgt = parseRef(o.at("delete").as_array(), r.cur.reference);
+            auto mt = sync_->dnMap.find(tgt.dn);
+            if (mt == sync_->dnMap.end()) return;
+            int tdn = mt->second;
+            bool upd = o.if_contains("update") && o.at("update").is_bool() && o.at("update").as_bool();
+            std::string dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (upd ? "1" : "0");
+            ensureDeleteKeysLoaded();
+            if (sync_->deleteKeys.count(dkey)) return;
+            sync_->deleteKeys.insert(dkey);
+            int rIdx = refIndexOfDn(r.cur.reference);
+            json::object out = o;
+            if (rIdx >= 0) {
+                out.at("delete").as_array()[rIdx] = tdn;
+                if (out.if_contains("this")) {
+                    RecRef a = parseRef(o.at("this").as_array(), r.cur.reference);
+                    auto ma = sync_->dnMap.find(a.dn);
+                    out.at("this").as_array()[rIdx] = (ma != sync_->dnMap.end()) ? ma->second : a.dn;
+                }
             }
-        });
+            appendToMonth(month, json::serialize(out));
+            applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn));
+            sync_->received++;
+        }
         return;
+    }
+    if (v.is_array()) {
+        if (!r.headerReceived) {
+            r.cur = canonicalSchema();
+            auto& last = monthSchema_[month];
+            if (last != r.cur) { appendToMonth(month, canonicalHeaderLine()); last = r.cur; }
+        }
+        int dnIdx = -1;
+        for (size_t i = 0; i < r.cur.columns.size(); ++i) if (r.cur.columns[i] == "dev_no") dnIdx = (int)i;
+        if (dnIdx < 0) return;
+        Event e = parseEventArray(v.as_array(), r.cur);
+        auto m = sync_->dnMap.find(e.dev_no);
+        if (m == sync_->dnMap.end()) return;
+        int md = m->second;
+        if (md == deviceNo_) return;                            // эхо своих
+        e.dev_no = md;
+        if (knownEvent(e.key())) return;
+        json::array outA = v.as_array();
+        if (dnIdx < (int)outA.size()) outA[dnIdx] = md;
+        appendToMonth(month, json::serialize(outA));
+        applyEventToState(e);
+        sync_->received++;
     }
 }
 
@@ -942,7 +903,12 @@ int Store::syncDedup() {
 }
 
 void Store::syncCommit(int peerDn) {
-    saveSyncIndex(peerDn, fileStates());
+    // Состояние собеседника: после успешного обмена у него есть все наши месячные
+    // файлы целиком — фиксируем их текущие размеры как его offset.
+    std::map<int, long long> off;
+    for (auto& [yyyymm, path] : enumerateMonths(dbDir()))
+        off[yyyymm] = (long long)fs::file_size(path);
+    saveSyncIndex(peerDn, off);
 }
 
 } // namespace ha

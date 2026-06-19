@@ -2,7 +2,7 @@
 #include <fstream>
 #include <random>
 #include <chrono>
-#include <iterator>
+#include <vector>
 #include <boost/json.hpp>
 
 namespace fs = std::filesystem;
@@ -11,33 +11,33 @@ namespace json = boost::json;
 namespace ha {
 
 bool readValues(const fs::path& p,
-                const std::function<void(const json::value&, std::string_view)>& onValue) {
+                const std::function<void(const json::value&)>& onValue) {
     std::ifstream in(p, std::ios::binary);
     if (!in.is_open()) return false;
-    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-    const char* data = content.data();
-    std::size_t n = content.size();
-    std::size_t pos = 0;
     json::stream_parser sp;
+    bool atStart = true;                  // мы на границе перед новым значением
+    std::vector<char> block(64 * 1024);
 
-    while (pos < n) {
-        // пропустить пробелы/переводы строк между значениями
-        while (pos < n && static_cast<unsigned char>(data[pos]) <= ' ') ++pos;
-        if (pos >= n) break;
-
-        sp.reset();
-        boost::system::error_code ec;
-        std::size_t consumed = sp.write_some(data + pos, n - pos, ec);
-        if (ec) break;                 // некорректный JSON — прекращаем
-        std::size_t start = pos;
-        pos += consumed;
-        if (!sp.done()) break;         // неполное значение в конце файла
-
-        json::value v = sp.release();
-        std::size_t end = pos;
-        while (end > start && static_cast<unsigned char>(data[end - 1]) <= ' ') --end;
-        onValue(v, std::string_view(data + start, end - start));
+    while (in) {
+        in.read(block.data(), (std::streamsize)block.size());
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        const char* p2 = block.data();
+        std::size_t rem = (std::size_t)got;
+        while (rem > 0) {
+            if (atStart) {                // пропустить пробелы/переводы строк между значениями
+                while (rem > 0 && (unsigned char)*p2 <= ' ') { ++p2; --rem; }
+                if (rem == 0) break;
+                atStart = false;
+            }
+            boost::system::error_code ec;
+            std::size_t consumed = sp.write_some(p2, rem, ec);
+            p2 += consumed; rem -= consumed;
+            if (ec) return true;          // некорректный JSON — прекращаем
+            if (sp.done()) { onValue(sp.release()); sp.reset(); atStart = true; }
+            else break;                   // значение не закончилось — нужен следующий блок
+        }
     }
     return true;
 }

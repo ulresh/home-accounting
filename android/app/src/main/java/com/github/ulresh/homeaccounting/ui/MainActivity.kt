@@ -460,6 +460,7 @@ private fun SyncDialog(store: Store, onDismiss: () -> Unit) {
     }
 
     val server = remember { SyncServer(store) }
+    val client = remember { SyncClient(store) }
     val scanLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { res ->
@@ -468,7 +469,7 @@ private fun SyncDialog(store: Store, onDismiss: () -> Unit) {
             val info = PairInfo.fromJson(text)
             busy = true; status = "Подключение…"
             scope.launch {
-                val r = withContext(Dispatchers.IO) { SyncClient(store).connect(info, confirmFn) }
+                val r = withContext(Dispatchers.IO) { client.connect(info, confirmFn) }
                 showResult(r)
             }
         }
@@ -476,7 +477,7 @@ private fun SyncDialog(store: Store, onDismiss: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
     AlertDialog(
-        onDismissRequest = { server.cancel(); onDismiss() },
+        onDismissRequest = { server.cancel(); client.cancel(); onDismiss() },
         title = { Text("Синхронизация") },
         text = {
             Column(
@@ -522,7 +523,7 @@ private fun SyncDialog(store: Store, onDismiss: () -> Unit) {
                     if (info.ip.isNotEmpty() && info.port != 0 && info.code.isNotEmpty()) {
                         busy = true; status = "Подключение…"
                         scope.launch {
-                            val r = withContext(Dispatchers.IO) { SyncClient(store).connect(info, confirmFn) }
+                            val r = withContext(Dispatchers.IO) { client.connect(info, confirmFn) }
                             showResult(r)
                         }
                     }
@@ -531,7 +532,7 @@ private fun SyncDialog(store: Store, onDismiss: () -> Unit) {
                 if (status.isNotEmpty()) Text(status)
             }
         },
-        confirmButton = { TextButton(onClick = { server.cancel(); onDismiss() }) { Text("Закрыть") } }
+        confirmButton = { TextButton(onClick = { server.cancel(); client.cancel(); onDismiss() }) { Text("Закрыть") } }
     )
 
     confirmReq?.let { (pubkey, def) ->

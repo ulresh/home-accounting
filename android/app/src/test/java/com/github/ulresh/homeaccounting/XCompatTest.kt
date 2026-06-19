@@ -1,8 +1,8 @@
 package com.github.ulresh.homeaccounting
 
 import com.github.ulresh.homeaccounting.model.CatalogEntry
+import com.github.ulresh.homeaccounting.model.ListManifest
 import com.github.ulresh.homeaccounting.model.Store
-import com.github.ulresh.homeaccounting.model.SyncBlob
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -52,16 +52,24 @@ class XCompatTest {
 
     private fun writeExchange(s: Store, file: File) {
         s.syncBegin(99)
-        val blobs = s.syncBuildOutgoing(true)
+        val items = s.syncPlanOutgoing(ListManifest())     // партнёр без данных -> прислать всё
         file.outputStream().use { o ->
-            for (b in blobs) {
-                val bytes = b.data.toByteArray(Charsets.UTF_8)
-                val header = if (b.kind == "event-tail")
-                    "[\"event-tail\",${b.month},${b.offset},${bytes.size}]"
+            for (it in items) {
+                val header = if (it.kind == "event-tail")
+                    "[\"event-tail\",${it.month},${it.offset},${it.frameSize()}]"
                 else
-                    "[\"${b.kind}\",${bytes.size}]"
+                    "[\"${it.kind}\",${it.frameSize()}]"
                 o.write((header + "\n").toByteArray(Charsets.UTF_8))
-                o.write(bytes); o.write('\n'.code)
+                if (it.prepend.isNotEmpty()) o.write(it.prepend.toByteArray(Charsets.UTF_8))
+                if (it.fileLen > 0 && it.path.exists()) {
+                    it.path.inputStream().use { ins ->
+                        var toSkip = it.fileFrom.toLong()
+                        while (toSkip > 0) { val k = ins.skip(toSkip); if (k <= 0) break; toSkip -= k }
+                        val block = ByteArray(16384); var rem = it.fileLen
+                        while (rem > 0) { val r = ins.read(block, 0, minOf(rem, block.size)); if (r < 0) break; o.write(block, 0, r); rem -= r }
+                    }
+                }
+                o.write('\n'.code)
             }
             o.write("[\"end\"]\n".toByteArray(Charsets.UTF_8))
         }
@@ -83,18 +91,19 @@ class XCompatTest {
             val a = Json.parseToJsonElement(hdr).jsonArray
             val kind = a[0].jsonPrimitive.content
             if (kind == "end") break
-            val blob = if (kind == "event-tail") {
-                val month = a[1].jsonPrimitive.int; val offset = a[2].jsonPrimitive.int; val size = a[3].jsonPrimitive.int
-                val data = String(all, pos, size, Charsets.UTF_8); pos += size
-                if (pos < all.size && all[pos].toInt() == '\n'.code) pos++
-                SyncBlob("event-tail", month, offset, data)
-            } else {
-                val size = a[1].jsonPrimitive.int
-                val data = String(all, pos, size, Charsets.UTF_8); pos += size
-                if (pos < all.size && all[pos].toInt() == '\n'.code) pos++
-                SyncBlob(kind, 0, 0, data)
+            var month = 0
+            val size: Int
+            if (kind == "event-tail") { month = a[1].jsonPrimitive.int; size = a[3].jsonPrimitive.int }
+            else size = a[1].jsonPrimitive.int
+            s.syncRecvBegin(kind, month, true)
+            var rem = size
+            while (rem > 0) {
+                val chunk = minOf(rem, 4096)
+                s.syncRecvFeed(all, pos, chunk)
+                pos += chunk; rem -= chunk
             }
-            s.syncApply(blob, true, null)
+            s.syncRecvFinish()
+            if (pos < all.size && all[pos].toInt() == '\n'.code) pos++
         }
         s.syncEnd()
     }

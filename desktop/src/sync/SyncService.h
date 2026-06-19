@@ -38,8 +38,8 @@ public:
     PairInfo   listen();                 // занять свободный порт, сгенерировать код
     SyncResult wait(ConfirmFn confirm);  // блокирующе: принять и синхронизировать
     void       cancel();
+    struct Impl;                         // определение в .cpp (нужно корутинам)
 private:
-    struct Impl;
     std::unique_ptr<Impl> d_;
 };
 
@@ -47,9 +47,12 @@ private:
 class SyncClient {
 public:
     explicit SyncClient(Store& store);
+    ~SyncClient();
     SyncResult connect(const PairInfo& info, ConfirmFn confirm);
+    void       cancel();                 // прервать синхронизацию в любом месте
+    struct Impl;                         // определение в .cpp (нужно корутинам)
 private:
-    Store& store_;
+    std::unique_ptr<Impl> d_;
 };
 
 } // namespace ha

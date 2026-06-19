@@ -40,12 +40,25 @@ data class FileState(
     val sha1: String = "",
 )
 
-// Блок данных, передаваемый «без разбора» (хвост файла).
+// План отправки одного блока БЕЗ данных в памяти: заголовок + (опц.) prepend +
+// содержимое файла [fileFrom, fileFrom+fileLen). Сеть читает файл блоками и сразу шлёт.
 //   kind = "event-tail"  -> [event-tail, yyyymm, offset, size]\n<данные>\n
 //   kind = "device-data" / "people-data" / "catalog-data" -> [kind, size]\n<данные>\n
-data class SyncBlob(
+data class SyncSendItem(
     val kind: String,
-    val month: Int = 0,    // yyyymm, только для event-tail
-    val offset: Int = 0,   // только для event-tail
-    val data: String = "",
+    val month: Int = 0,
+    val offset: Int = 0,
+    val prepend: String = "",
+    val path: java.io.File,
+    val fileFrom: Int = 0,
+    val fileLen: Int = 0,
+) {
+    fun frameSize(): Int = prepend.toByteArray(Charsets.UTF_8).size + fileLen
+}
+
+// Манифест справочников (для обмена «состоянием» в начале сессии).
+data class ListManifest(
+    val people: FileState = FileState(),
+    val catalog: FileState = FileState(),
+    val device: FileState = FileState(),
 )

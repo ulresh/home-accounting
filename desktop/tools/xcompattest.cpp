@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace ha;
 namespace fs = std::filesystem;
@@ -69,26 +70,41 @@ static void assertScenario(Store& s, const std::string& tag) {
     check(ov, tag + ": каталог Овощи(Помидоры)");
 }
 
-// Сериализовать исходящие блоки в точном проводном кадрировании.
+// Сериализовать исходящие блоки в точном проводном кадрировании (потоково из файлов).
 static void writeExchange(Store& s, const fs::path& file) {
     s.syncBegin(99);
-    auto blobs = s.syncBuildOutgoing(true);
+    ListManifest empty;                 // партнёр без данных -> прислать всё
+    auto items = s.syncPlanOutgoing(empty);
     std::ofstream o(file, std::ios::binary);
-    for (auto& b : blobs) {
+    for (auto& it : items) {
         json::array h;
-        if (b.kind == "event-tail") {
-            h.emplace_back("event-tail"); h.emplace_back(b.month);
-            h.emplace_back((int64_t)b.offset); h.emplace_back((int64_t)b.data.size());
+        if (it.kind == "event-tail") {
+            h.emplace_back("event-tail"); h.emplace_back(it.month);
+            h.emplace_back((int64_t)it.offset); h.emplace_back((int64_t)it.frameSize());
         } else {
-            h.emplace_back(b.kind); h.emplace_back((int64_t)b.data.size());
+            h.emplace_back(it.kind); h.emplace_back((int64_t)it.frameSize());
         }
-        o << json::serialize(h) << "\n" << b.data << "\n";
+        o << json::serialize(h) << "\n";
+        o << it.prepend;
+        std::ifstream in(it.path, std::ios::binary);
+        if (in) in.seekg(it.fileFrom);
+        std::vector<char> buf(16384);
+        long long rem = it.fileLen;
+        while (rem > 0 && in) {
+            std::streamsize want = (std::streamsize)std::min<long long>(rem, (long long)buf.size());
+            in.read(buf.data(), want);
+            std::streamsize got = in.gcount();
+            if (got <= 0) break;
+            o.write(buf.data(), got);
+            rem -= got;
+        }
+        o << "\n";
     }
     o << "[\"end\"]\n";
     s.syncEnd();
 }
 
-// Разобрать проводной поток ДРУГОЙ платформы и применить как при синхронизации.
+// Разобрать проводной поток ДРУГОЙ платформы и применить потоково (по блокам).
 static void applyExchange(Store& s, const fs::path& file) {
     std::ifstream in(file, std::ios::binary);
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -104,15 +120,18 @@ static void applyExchange(Store& s, const fs::path& file) {
         auto& a = v.as_array();
         std::string kind = std::string(a[0].as_string());
         if (kind == "end") break;
-        SyncBlob b; b.kind = kind;
-        long long size;
-        if (kind == "event-tail") {
-            b.month = (int)a[1].as_int64(); b.offset = a[2].as_int64(); size = a[3].as_int64();
-        } else size = a[1].as_int64();
-        b.data = all.substr(pos, (size_t)size);
-        pos += (size_t)size;
+        int month = 0; long long size;
+        if (kind == "event-tail") { month = (int)a[1].as_int64(); size = a[3].as_int64(); }
+        else size = a[1].as_int64();
+        s.syncRecvBegin(kind, month, /*replaceLists=*/true);
+        long long rem = size;
+        while (rem > 0 && pos < n) {
+            size_t chunk = (size_t)std::min<long long>(rem, 4096);
+            s.syncRecvFeed(all.data() + pos, chunk);
+            pos += chunk; rem -= chunk;
+        }
+        s.syncRecvFinish();
         if (pos < n && all[pos] == '\n') pos++;
-        s.syncApply(b, true, nullptr);
     }
     s.syncEnd();
 }

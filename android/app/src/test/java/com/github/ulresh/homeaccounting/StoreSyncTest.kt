@@ -164,4 +164,22 @@ class StoreSyncTest {
         val b2 = Store(b.root); b2.load()
         assertEquals("после перезагрузки не воскресает", 0, countSubject(b2, "Книга"))
     }
+
+    // 6. Прерывание синхронизации (cancel в любом месте)
+    @Test fun cancelInterrupts() {
+        val a = freshStore()
+        val server = SyncServer(a)
+        server.listen()
+        var r: SyncResult? = null
+        val t0 = System.currentTimeMillis()
+        val t = Thread { r = server.waitAndSync { true } }
+        t.start()
+        Thread.sleep(150)
+        server.cancel()                       // прервать ожидание подключения
+        t.join(3000)
+        val took = System.currentTimeMillis() - t0
+        assertTrue("ожидание прервано (не выполнено)", r != null && !r!!.ok)
+        assertTrue("прерывание сработало быстро, без зависания", took < 3000)
+    }
+
 }

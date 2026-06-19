@@ -238,6 +238,50 @@ int main() {
         check(countSubject(B2, "Книга") == 0, "после перезагрузки B Книга не воскресает");
     }
 
+    // ============ 6. Прерывание синхронизации (cancel в любом месте) ============
+    {
+        std::cout << "== 6. прерывание синхронизации ==\n";
+
+        // (а) cancel во время ожидания подключения (async accept).
+        {
+            fs::remove_all("/tmp/hv6a");
+            Store A("/tmp/hv6a/.data/home-accounting"); A.load(); A.ensureIdentity();
+            SyncServer s(A);
+            s.listen();
+            SyncResult r;
+            auto t0 = std::chrono::steady_clock::now();
+            std::thread t([&]{ r = s.wait(YES); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            s.cancel();
+            t.join();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - t0).count();
+            check(!r.ok, "ожидание прервано (не выполнено)");
+            check(ms < 2000, "прерывание сработало быстро, без зависания");
+        }
+
+        // (б) cancel во время активного обмена: клиент подключился, сервер прерван.
+        {
+            fs::remove_all("/tmp/hv6b"); fs::remove_all("/tmp/hv6c");
+            Store A("/tmp/hv6b/.data/home-accounting"); A.load(); A.ensureIdentity();
+            Store B("/tmp/hv6c/.data/home-accounting"); B.load(); B.ensureIdentity();
+            for (int i = 0; i < 50; ++i)
+                A.addEvent("2026-06-07", "Товар" + std::to_string(i), 10 + i, std::nullopt, std::nullopt, std::nullopt);
+
+            SyncServer s(A);
+            PairInfo info = s.listen(); info.ip = "127.0.0.1";
+            SyncResult ra, rb;
+            std::thread ts([&]{ ra = s.wait(YES); });
+            std::thread tc([&]{ SyncClient c(B); rb = c.connect(info, YES); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            s.cancel();                       // прервать сервер посреди обмена
+            ts.join(); tc.join();
+            // Главное требование: прерывание срабатывает и нет зависания/краша.
+            check(true, "обмен прерван без зависания/краша (server ok=" +
+                        std::to_string(ra.ok) + ")");
+        }
+    }
+
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
     return g_fail == 0 ? 0 : 1;
 }

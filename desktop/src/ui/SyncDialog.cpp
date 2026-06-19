@@ -83,13 +83,16 @@ SyncDialog::SyncDialog(ha::Store& store, QWidget* parent)
 SyncDialog::~SyncDialog() {
     closing_ = true;
     if (server_) server_->cancel();
+    if (client_) client_->cancel();
     if (worker_.joinable()) worker_.join();
 }
 
 void SyncDialog::closeEvent(QCloseEvent* e) {
-    // Закрытие окна (в т.ч. командой оконной системы) прерывает ожидание.
+    // Закрытие окна (в т.ч. командой оконной системы) прерывает синхронизацию
+    // в любой момент — и приём (server), и подключение (client).
     closing_ = true;
     if (server_) server_->cancel();
+    if (client_) client_->cancel();
     QDialog::closeEvent(e);
 }
 
@@ -164,10 +167,10 @@ void SyncDialog::startClient() {
     clientBtn_->setEnabled(false);
     status_->setText(tr("Подключение…"));
 
+    client_ = std::make_unique<ha::SyncClient>(store_);
     worker_ = std::thread([this, info]() {
-        ha::SyncClient client(store_);
         auto confirm = [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); };
-        ha::SyncResult r = client.connect(info, confirm);
+        ha::SyncResult r = client_->connect(info, confirm);
         QString msg = r.ok
             ? tr("Передано %1, принято %2").arg(r.sent).arg(r.received)
             : tr("Не выполнено");

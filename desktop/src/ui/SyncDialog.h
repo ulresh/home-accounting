@@ -48,6 +48,7 @@ private:
     QLabel*      status_;
 
     std::unique_ptr<ha::SyncServer> server_;
+    std::unique_ptr<ha::SyncClient> client_;
     std::thread worker_;
     bool busy_ = false;
     std::atomic<bool> closing_{false};

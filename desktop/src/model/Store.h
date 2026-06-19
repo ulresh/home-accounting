@@ -7,6 +7,8 @@
 #include <vector>
 #include <optional>
 #include <memory>
+#include <boost/json/stream_parser.hpp>
+#include <boost/json/value.hpp>
 
 namespace ha {
 
@@ -16,16 +18,25 @@ struct FileState {
     std::string sha1;
 };
 
-// Блок данных, передаваемый при синхронизации «без разбора» (хвост файла).
-//   kind = "event-tail"      -> [event-tail, yyyymm, offset, size]\n<данные>\n
-//   kind = "device-data"     -> [device-data, size]\n<данные>\n
-//   kind = "people-data"     -> [people-data, size]\n<данные>\n
-//   kind = "catalog-data"    -> [catalog-data, size]\n<данные>\n
-struct SyncBlob {
-    std::string kind;
-    int         month  = 0;   // yyyymm, только для event-tail
-    long long   offset = 0;   // только для event-tail
-    std::string data;         // сырое содержимое
+// План отправки одного блока БЕЗ данных в памяти: заголовок-строка + (опц.)
+// prepend + содержимое файла [fileFrom, fileFrom+fileLen). Сеть-уровень читает
+// файл блоками и сразу шлёт. Кадры:
+//   kind = "event-tail"   -> [event-tail, yyyymm, offset, size]\n<данные>\n
+//   kind = "device-data"  -> [device-data, size]\n<данные>\n  (people/catalog — аналогично)
+struct SyncSendItem {
+    std::string           kind;
+    int                   month  = 0;     // yyyymm (event-tail)
+    long long             offset = 0;     // смещение в кадре (event-tail)
+    std::string           prepend;        // байты перед содержимым файла (заголовок хвоста)
+    std::filesystem::path path;           // источник
+    long long             fileFrom = 0;
+    long long             fileLen  = 0;
+    long long frameSize() const { return (long long)prepend.size() + fileLen; }
+};
+
+// Манифест справочников (для обмена «состоянием» в начале сессии).
+struct ListManifest {
+    FileState people, catalog, device;
 };
 
 // Схема событийной строки: порядок/состав колонок и состав «ссылки» (reference),
@@ -97,35 +108,41 @@ public:
     int  maxDeviceNo() const;
     void renumberSelf(int newNo);
 
-    // --- синхронизация (файловая, инкрементная) ---
-    // Снимок состояния всех синхронизируемых файлов (device/people/catalog + месяцы).
-    std::map<std::string, FileState> fileStates() const;
+    // --- синхронизация (файловая, инкрементная, потоковая) ---
+    // Манифест наших справочников (для обмена в начале сессии).
+    ListManifest listManifest() const;
 
-    // Индекс по партнёру: sync/<peerDn>.jsonl  (что мы уже передавали).
-    std::map<std::string, FileState> loadSyncIndex(int peerDn) const;
-    void saveSyncIndex(int peerDn, const std::map<std::string, FileState>& st) const;
+    // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
+    // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
+    std::map<int, long long> loadSyncIndex(int peerDn) const;
+    void saveSyncIndex(int peerDn, const std::map<int, long long>& off) const;
 
     // Начать/закончить сессию синхронизации с партнёром (peerDn — его номер у нас).
     void syncBegin(int peerDn);
     void syncEnd();
 
-    // Сформировать исходящие блоки относительно базовой точки сессии.
-    // forceLists=true — отдать people/catalog целиком (итог слияния), независимо
-    // от изменений (для стороны, которая слила и отдаёт результат).
-    std::vector<SyncBlob> syncBuildOutgoing(bool forceLists) const;
+    // Что отправить партнёру (без данных — только план: путь/смещение/длина).
+    // Решение принимается по СОСТОЯНИЮ СОБЕСЕДНИКА: справочники шлём, только если
+    // наша версия отличается от того, что у партнёра (peer); хвосты — от offset,
+    // который партнёр уже получил.
+    std::vector<SyncSendItem> syncPlanOutgoing(const ListManifest& peer) const;
 
-    // Применить входящий блок. replaceLists=true — принять people/catalog как
-    // получили (другая сторона уже слила). addedDevices — новые pubkey (опц.).
-    void syncApply(const SyncBlob& b, bool replaceLists,
-                   std::set<std::string>* addedDevices = nullptr);
+    // Потоковый приём блока: begin -> feed(блоки сети) -> finish. Применяется
+    // сразу по мере поступления, без накопления всего блока в памяти.
+    void syncRecvBegin(const std::string& kind, int month, bool replaceLists);
+    void syncRecvFeed(const char* data, std::size_t n);
+    void syncRecvFinish();
 
     // Удаление более поздних дубликатов (совпадение всех полей кроме служебных).
     int  syncDedup();
 
-    // Зафиксировать итоговое состояние индекса партнёра (после вливания).
+    // Зафиксировать состояние собеседника (после успешного обмена).
     void syncCommit(int peerDn);
 
     int  syncReceived() const { return sync_ ? sync_->received : 0; }
+
+    // Действующий заголовок (схема) месяца — для дозаписи заголовка перед хвостом.
+    std::string inEffectHeader(int yyyymm) const;
 
     std::filesystem::path root() const { return root_; }
 
@@ -175,17 +192,32 @@ private:
     std::map<std::string, int> seqAtStamp_;      // счётчик RN на штамп (наши записи)
     bool anyEventLines_ = false;                 // были ли вообще строки событий
 
+    // Потоковый приём одного блока: инкрементный разбор по мере поступления байт.
+    struct RecvState {
+        std::string kind;
+        int month = 0;
+        bool replaceLists = false;
+        boost::json::stream_parser sp;
+        bool atStart = true;
+        Schema cur;
+        bool headerReceived = false;
+        std::vector<std::string>  people;        // накопление для replace/merge
+        std::vector<CatalogEntry> catalog;
+    };
+
     // Состояние активной сессии синхронизации (между syncBegin/syncEnd).
     struct SyncSession {
         int peerDn = 0;
-        std::map<std::string, FileState> baseline;
+        std::map<int, long long> offsets;        // СОСТОЯНИЕ СОБЕСЕДНИКА: yyyymm -> сколько наших байт у него
         std::map<int, int> dnMap;                // DN партнёра -> наш DN
         std::set<std::string> deleteKeys;        // дедуп строк удаления (лениво)
         bool deleteKeysLoaded = false;
         int received = 0;
+        std::unique_ptr<RecvState> recv;         // текущий принимаемый блок
     };
     std::unique_ptr<SyncSession> sync_;
     void ensureDeleteKeysLoaded();
+    void handleRecvValue(const boost::json::value& v);
 };
 
 } // namespace ha

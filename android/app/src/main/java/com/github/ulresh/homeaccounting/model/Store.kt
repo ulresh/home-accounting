@@ -67,56 +67,16 @@ class Store(val root: File) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
     // ---------- ввод/вывод ----------
-    // Границы каждого значения определяются разбором JSON-структуры (учёт {}[] и строк),
-    // затем каждое значение разбирается JSON-парсером. Устойчиво к значению на нескольких
-    // строках и к нескольким значениям в одной строке.
-    private fun parseValues(text: String, onValue: (JsonElement) -> Unit) {
-        val n = text.length
-        var i = 0
-        while (i < n) {
-            while (i < n && text[i].isWhitespace()) i++
-            if (i >= n) break
-            val start = i
-            when (text[i]) {
-                '{', '[' -> {
-                    var depth = 0; var inStr = false; var esc = false
-                    while (i < n) {
-                        val ch = text[i]
-                        if (inStr) {
-                            when {
-                                esc -> esc = false
-                                ch == '\\' -> esc = true
-                                ch == '"' -> inStr = false
-                            }
-                            i++
-                        } else when (ch) {
-                            '"' -> { inStr = true; i++ }
-                            '{', '[' -> { depth++; i++ }
-                            '}', ']' -> { depth--; i++; if (depth == 0) break }
-                            else -> i++
-                        }
-                    }
-                }
-                '"' -> {
-                    i++
-                    var esc = false
-                    while (i < n) {
-                        val ch = text[i]; i++
-                        if (esc) esc = false
-                        else if (ch == '\\') esc = true
-                        else if (ch == '"') break
-                    }
-                }
-                else -> while (i < n && !text[i].isWhitespace()) i++
-            }
-            val chunk = text.substring(start, i).trim()
-            if (chunk.isNotEmpty()) runCatching { onValue(json.parseToJsonElement(chunk)) }
-        }
-    }
-
+    // Читаем файл ПОТОКОМ: блоками фиксированного размера, сразу скармливая их
+    // инкрементному разборщику (JsonlByteSplitter). Целиком файл в память не грузим.
     private fun readValues(f: File, onValue: (JsonElement) -> Unit) {
         if (!f.exists()) return
-        parseValues(f.readText(), onValue)
+        val sp = JsonlByteSplitter(onValue)
+        f.inputStream().use { ins ->
+            val block = ByteArray(64 * 1024)
+            while (true) { val r = ins.read(block); if (r < 0) break; sp.feed(block, 0, r) }
+        }
+        sp.finish()
     }
 
     private fun appendLine(f: File, line: String) {
@@ -132,20 +92,16 @@ class Store(val root: File) {
     }
 
     private fun fileBytesLen(f: File): Int = if (f.exists()) f.length().toInt() else 0
-    private fun readWholeStr(f: File): String = if (f.exists()) f.readText() else ""
-    private fun readSliceStr(f: File, off: Int, len: Int): String {
-        if (!f.exists() || len <= 0) return ""
-        val all = f.readBytes()
-        val end = minOf(off + len, all.size)
-        if (off >= end) return ""
-        return String(all.copyOfRange(off, end), Charsets.UTF_8)
-    }
-    private fun sha1hex(b: ByteArray): String =
-        MessageDigest.getInstance("SHA-1").digest(b).joinToString("") { "%02x".format(it) }
+    // Размер + SHA1 файла потоком (блоками), без загрузки целиком в память.
     private fun stateOf(f: File): FileState {
         if (!f.exists()) return FileState(0, "")
-        val b = f.readBytes()
-        return FileState(b.size, if (b.isEmpty()) "" else sha1hex(b))
+        val md = MessageDigest.getInstance("SHA-1")
+        var total = 0; var any = false
+        f.inputStream().use { ins ->
+            val block = ByteArray(64 * 1024)
+            while (true) { val r = ins.read(block); if (r < 0) break; md.update(block, 0, r); total += r; any = true }
+        }
+        return FileState(total, if (any) md.digest().joinToString("") { "%02x".format(it) } else "")
     }
 
     // ---------- схемы ----------
@@ -153,13 +109,11 @@ class Store(val root: File) {
         listOf("event_datetime", "subject", "cost", "edit_datetime", "rec_no", "dev_no", "people", "volume", "comment"),
         listOf("edit_datetime", "rec_no", "dev_no"),
     )
-    private fun canonicalHeaderLine(): String {
-        val s = canonicalSchema()
-        return buildJsonObject {
-            put("header", buildJsonArray { s.columns.forEach { add(it) } })
-            put("reference", buildJsonArray { s.reference.forEach { add(it) } })
-        }.toString()
-    }
+    private fun headerLineFor(sc: Schema): String = buildJsonObject {
+        put("header", buildJsonArray { sc.columns.forEach { add(it) } })
+        put("reference", buildJsonArray { sc.reference.forEach { add(it) } })
+    }.toString()
+    private fun canonicalHeaderLine(): String = headerLineFor(canonicalSchema())
     private fun schemaFromHeader(o: JsonObject): Schema {
         val cols = (o["header"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } ?: emptyList()
         val ref = (o["reference"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } ?: emptyList()
@@ -592,53 +546,51 @@ class Store(val root: File) {
     //                Инкрементная синхронизация
     // ============================================================
 
+    private class RecvState(val kind: String, val month: Int, val replaceLists: Boolean) {
+        var cur: Schema = Schema(emptyList(), emptyList())
+        var headerReceived = false
+        val people = ArrayList<String>()
+        val catalog = ArrayList<CatalogEntry>()
+        lateinit var splitter: JsonlByteSplitter
+    }
     private class SyncSession(val peerDn: Int) {
-        var baseline: Map<String, FileState> = emptyMap()
+        var offsets: Map<Int, Long> = emptyMap()   // СОСТОЯНИЕ СОБЕСЕДНИКА: yyyymm -> сколько наших байт у него
         val dnMap = HashMap<Int, Int>()
         val deleteKeys = HashSet<String>()
         var deleteKeysLoaded = false
         var received = 0
+        var recv: RecvState? = null
     }
     private var sync: SyncSession? = null
 
-    fun fileStates(): LinkedHashMap<String, FileState> {
-        val st = LinkedHashMap<String, FileState>()
-        st["device"] = stateOf(File(dbDir(), "device.jsonl"))
-        st["people"] = stateOf(File(dbDir(), "people.jsonl"))
-        st["catalog"] = stateOf(File(dbDir(), "catalog.jsonl"))
-        for ((yyyymm, f) in enumerateMonths()) st[yyyymm.toString()] = stateOf(f)
-        return st
-    }
+    fun listManifest(): ListManifest = ListManifest(
+        stateOf(File(dbDir(), "people.jsonl")),
+        stateOf(File(dbDir(), "catalog.jsonl")),
+        stateOf(File(dbDir(), "device.jsonl")),
+    )
 
-    fun loadSyncIndex(peerDn: Int): HashMap<String, FileState> {
-        val st = HashMap<String, FileState>()
+    // Индекс = состояние собеседника: [yyyymm, offset]. Старые записи со строковым ключом игнорируем.
+    fun loadSyncIndex(peerDn: Int): HashMap<Int, Long> {
+        val off = HashMap<Int, Long>()
         readValues(syncIndexPath(peerDn)) { el ->
             (el as? JsonArray)?.let { a ->
                 if (a.size >= 2) {
-                    val key = a[0].jsonPrimitive.content
-                    val size = a[1].jsonPrimitive.intOrNull ?: 0
-                    val sha = if (a.size > 2 && a[2] is JsonPrimitive && (a[2] as JsonPrimitive).isString) a[2].jsonPrimitive.content else ""
-                    st[key] = FileState(size, sha)
+                    val k = (a[0] as? JsonPrimitive)?.intOrNull
+                    if (k != null) off[k] = a[1].jsonPrimitive.longOrNull ?: 0L
                 }
             }
         }
-        return st
+        return off
     }
-    fun saveSyncIndex(peerDn: Int, st: Map<String, FileState>) {
+    fun saveSyncIndex(peerDn: Int, off: Map<Int, Long>) {
         val sb = StringBuilder()
-        for ((key, fsr) in st) {
-            val arr = buildJsonArray {
-                if (key.isNotEmpty() && key.all { it.isDigit() }) add(key.toLong()) else add(key)
-                add(fsr.size); add(fsr.sha1)
-            }
-            sb.append(arr.toString()).append("\n")
-        }
+        for ((month, o) in off) sb.append(buildJsonArray { add(month); add(o) }.toString()).append("\n")
         writeAtomic(syncIndexPath(peerDn), sb.toString())
     }
 
     fun syncBegin(peerDn: Int) {
         val s = SyncSession(peerDn)
-        s.baseline = loadSyncIndex(peerDn)
+        s.offsets = loadSyncIndex(peerDn)
         sync = s
     }
     fun syncEnd() { sync = null }
@@ -666,131 +618,129 @@ class Store(val root: File) {
         s.deleteKeysLoaded = true
     }
 
-    private fun inEffectHeaderAt(f: File, offset: Int): String {
-        val prefix = readSliceStr(f, 0, offset)
-        var last = ""
-        for (line in prefix.split("\n")) {
-            if (line.contains("\"header\"")) {
-                runCatching { val v = json.parseToJsonElement(line); if (v is JsonObject && v.containsKey("header")) last = line }
-            }
+    fun inEffectHeader(yyyymm: Int): String {
+        val sc = monthSchema[yyyymm] ?: return canonicalHeaderLine()
+        return headerLineFor(sc)
+    }
+
+    // Что отправить партнёру (планы — данные в память не накапливаем). Справочники
+    // шлём, только если у партнёра другая версия (его манифест); события — хвостом от offset.
+    fun syncPlanOutgoing(peer: ListManifest): List<SyncSendItem> {
+        val out = ArrayList<SyncSendItem>()
+        val dev = File(dbDir(), "device.jsonl")
+        out.add(SyncSendItem("device-data", path = dev, fileFrom = 0, fileLen = fileBytesLen(dev)))
+        run {
+            val f = File(dbDir(), "people.jsonl"); val me = stateOf(f)
+            if (me.size != peer.people.size || me.sha1 != peer.people.sha1)
+                out.add(SyncSendItem("people-data", path = f, fileLen = me.size))
         }
-        return if (last.isEmpty()) canonicalHeaderLine() else last
-    }
-
-    private fun stateChanged(base: Map<String, FileState>, cur: Map<String, FileState>, key: String): Boolean {
-        val cv = cur[key] ?: FileState(0, "")
-        val b = base[key] ?: return cv.size > 0
-        return b.size != cv.size || b.sha1 != cv.sha1
-    }
-
-    fun syncBuildOutgoing(forceLists: Boolean): List<SyncBlob> {
-        val out = ArrayList<SyncBlob>()
-        val cur = fileStates()
-        val base = sync?.baseline ?: emptyMap()
-
-        out.add(SyncBlob("device-data", 0, 0, readWholeStr(File(dbDir(), "device.jsonl"))))
-        if (forceLists || stateChanged(base, cur, "people"))
-            out.add(SyncBlob("people-data", 0, 0, readWholeStr(File(dbDir(), "people.jsonl"))))
-        if (forceLists || stateChanged(base, cur, "catalog"))
-            out.add(SyncBlob("catalog-data", 0, 0, readWholeStr(File(dbDir(), "catalog.jsonl"))))
-
+        run {
+            val f = File(dbDir(), "catalog.jsonl"); val me = stateOf(f)
+            if (me.size != peer.catalog.size || me.sha1 != peer.catalog.sha1)
+                out.add(SyncSendItem("catalog-data", path = f, fileLen = me.size))
+        }
         for ((yyyymm, f) in enumerateMonths()) {
-            val baseSize = base[yyyymm.toString()]?.size ?: 0
+            val off = (sync?.offsets?.get(yyyymm) ?: 0L).toInt()
             val size = fileBytesLen(f)
-            if (size <= baseSize) continue
-            var data = ""
-            if (baseSize > 0) data = inEffectHeaderAt(f, baseSize) + "\n"
-            data += readSliceStr(f, baseSize, size - baseSize)
-            out.add(SyncBlob("event-tail", yyyymm, baseSize, data))
+            if (size <= off) continue
+            val prepend = if (off > 0) inEffectHeader(yyyymm) + "\n" else ""
+            out.add(SyncSendItem("event-tail", month = yyyymm, offset = off, prepend = prepend,
+                                 path = f, fileFrom = off, fileLen = size - off))
         }
         return out
     }
 
-    fun syncApply(b: SyncBlob, replaceLists: Boolean, addedDevices: MutableSet<String>? = null) {
-        when (b.kind) {
-            "device-data" -> parseValues(b.data) { el ->
-                (el as? JsonArray)?.let { a ->
-                    if (a.size >= 2 && a[1] is JsonPrimitive && (a[1] as JsonPrimitive).isString) {
-                        val peerNo = a[0].jsonPrimitive.intOrNull ?: return@let
-                        val pub = a[1].jsonPrimitive.content
-                        val name = if (a.size > 2 && a[2] is JsonPrimitive && (a[2] as JsonPrimitive).isString) a[2].jsonPrimitive.content else "peer"
-                        val isNew = !knowsDevice(pub)
-                        val localNo = reserveDeviceNo(pub, peerNo, name)
-                        if (isNew) addedDevices?.add(pub)
-                        sync?.dnMap?.put(peerNo, localNo)
-                    }
+    // Потоковый приём блока: begin -> feed(блоки сети) -> finish (инкрементно).
+    fun syncRecvBegin(kind: String, month: Int, replaceLists: Boolean) {
+        val s = sync ?: return
+        val r = RecvState(kind, month, replaceLists)
+        r.cur = canonicalSchema()
+        r.splitter = JsonlByteSplitter { v -> handleRecvValue(r, v) }
+        s.recv = r
+    }
+    fun syncRecvFeed(data: ByteArray, off: Int, len: Int) { sync?.recv?.splitter?.feed(data, off, len) }
+    fun syncRecvFinish() {
+        val s = sync ?: return
+        val r = s.recv ?: return
+        r.splitter.finish()
+        when (r.kind) {
+            "people-data" -> if (r.replaceLists) { peopleList.clear(); peopleList.addAll(r.people); savePeople() }
+                             else { var ch = false; for (p in r.people) if (!peopleList.contains(p)) { peopleList.add(p); ch = true }; if (ch) savePeople() }
+            "catalog-data" -> if (r.replaceLists) { catalogList.clear(); catalogList.addAll(r.catalog); saveCatalog() }
+                              else for (e in r.catalog) upsertCatalog(e)
+        }
+        s.recv = null
+    }
+
+    private fun handleRecvValue(r: RecvState, el: JsonElement) {
+        val s = sync ?: return
+        when (r.kind) {
+            "device-data" -> (el as? JsonArray)?.let { a ->
+                if (a.size >= 2 && a[1] is JsonPrimitive && (a[1] as JsonPrimitive).isString) {
+                    val peerNo = a[0].jsonPrimitive.intOrNull ?: return
+                    val pub = a[1].jsonPrimitive.content
+                    val name = if (a.size > 2 && a[2] is JsonPrimitive && (a[2] as JsonPrimitive).isString) a[2].jsonPrimitive.content else "peer"
+                    val localNo = reserveDeviceNo(pub, peerNo, name)
+                    s.dnMap[peerNo] = localNo
                 }
             }
-            "people-data" -> {
-                val incoming = ArrayList<String>()
-                parseValues(b.data) { el -> (el as? JsonPrimitive)?.let { if (it.isString) incoming.add(it.content) } }
-                if (replaceLists) { peopleList.clear(); peopleList.addAll(incoming); savePeople() }
-                else { var ch = false; for (p in incoming) if (!peopleList.contains(p)) { peopleList.add(p); ch = true }; if (ch) savePeople() }
-            }
-            "catalog-data" -> {
-                val incoming = ArrayList<CatalogEntry>()
-                parseValues(b.data) { el ->
-                    (el as? JsonArray)?.let { a -> if (a.isNotEmpty()) incoming.add(CatalogEntry(a[0].jsonPrimitive.content, a.drop(1).map { it.jsonPrimitive.content })) }
-                }
-                if (replaceLists) { catalogList.clear(); catalogList.addAll(incoming); saveCatalog() }
-                else for (e in incoming) upsertCatalog(e)
-            }
-            "event-tail" -> applyEventTail(b.month, b.data)
+            "people-data" -> (el as? JsonPrimitive)?.let { if (it.isString) r.people.add(it.content) }
+            "catalog-data" -> (el as? JsonArray)?.let { a -> if (a.isNotEmpty()) r.catalog.add(CatalogEntry(a[0].jsonPrimitive.content, a.drop(1).map { it.jsonPrimitive.content })) }
+            "event-tail" -> handleEventTailValue(r, el)
         }
     }
 
-    private fun applyEventTail(month: Int, data: String) {
+    private fun handleEventTailValue(r: RecvState, el: JsonElement) {
         val s = sync ?: return
-        var cur = canonicalSchema()
-        parseValues(data) { el ->
-            when (el) {
-                is JsonObject -> {
-                    if (el.containsKey("header")) {
-                        val sch = schemaFromHeader(el)
-                        cur = sch
-                        if (monthSchema[month] != sch) appendToMonth(month, el.toString(), true, sch)
-                    } else {
-                        val del = el["delete"] as? JsonArray
-                        if (del != null) {
-                            val tgt = parseRef(del, cur.reference)
-                            val tdn = s.dnMap[tgt.dn] ?: return@parseValues
-                            val upd = (el["update"] as? JsonPrimitive)?.booleanOrNull == true
-                            val dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (if (upd) "1" else "0")
-                            ensureDeleteKeysLoaded()
-                            if (s.deleteKeys.contains(dkey)) return@parseValues
-                            s.deleteKeys.add(dkey)
-                            val rIdx = refIndexOfDn(cur.reference)
-                            val outObj = buildJsonObject {
-                                put("delete", if (rIdx >= 0) del.withReplaced(rIdx, JsonPrimitive(tdn)) else del)
-                                val th = el["this"] as? JsonArray
-                                if (th != null) {
-                                    val a = parseRef(th, cur.reference)
-                                    val adn = s.dnMap[a.dn] ?: a.dn
-                                    put("this", if (rIdx >= 0) th.withReplaced(rIdx, JsonPrimitive(adn)) else th)
-                                }
-                                if (upd) put("update", true)
-                            }
-                            appendToMonth(month, outObj.toString(), false, null)
-                            applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn))
-                            s.received++
-                        }
-                    }
+        val month = r.month
+        when (el) {
+            is JsonObject -> {
+                if (el.containsKey("header")) {
+                    val sch = schemaFromHeader(el); r.cur = sch; r.headerReceived = true
+                    if (monthSchema[month] != sch) appendToMonth(month, headerLineFor(sch), true, sch)
+                    return
                 }
-                is JsonArray -> {
-                    val dnIdx = cur.columns.indexOf("dev_no")
-                    if (dnIdx < 0) return@parseValues
-                    val e0 = parseEventArray(el, cur)
-                    val md = s.dnMap[e0.devNo] ?: return@parseValues
-                    if (md == deviceNo) return@parseValues
-                    val e = e0.copy(devNo = md)
-                    if (knownEvent(e.key())) return@parseValues
-                    val outA = if (dnIdx < el.size) el.withReplaced(dnIdx, JsonPrimitive(md)) else el
-                    appendToMonth(month, outA.toString(), false, null)
-                    applyEventToState(e)
+                val del = el["delete"] as? JsonArray
+                if (del != null) {
+                    if (!r.headerReceived) { r.cur = canonicalSchema(); if (monthSchema[month] != r.cur) appendToMonth(month, canonicalHeaderLine(), true, r.cur) }
+                    val tgt = parseRef(del, r.cur.reference)
+                    val tdn = s.dnMap[tgt.dn] ?: return
+                    val upd = (el["update"] as? JsonPrimitive)?.booleanOrNull == true
+                    val dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (if (upd) "1" else "0")
+                    ensureDeleteKeysLoaded()
+                    if (s.deleteKeys.contains(dkey)) return
+                    s.deleteKeys.add(dkey)
+                    val rIdx = refIndexOfDn(r.cur.reference)
+                    val outObj = buildJsonObject {
+                        put("delete", if (rIdx >= 0) del.withReplaced(rIdx, JsonPrimitive(tdn)) else del)
+                        val th = el["this"] as? JsonArray
+                        if (th != null) {
+                            val a = parseRef(th, r.cur.reference)
+                            val adn = s.dnMap[a.dn] ?: a.dn
+                            put("this", if (rIdx >= 0) th.withReplaced(rIdx, JsonPrimitive(adn)) else th)
+                        }
+                        if (upd) put("update", true)
+                    }
+                    appendToMonth(month, outObj.toString(), false, null)
+                    applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn))
                     s.received++
                 }
-                else -> {}
             }
+            is JsonArray -> {
+                if (!r.headerReceived) { r.cur = canonicalSchema(); if (monthSchema[month] != r.cur) appendToMonth(month, canonicalHeaderLine(), true, r.cur) }
+                val dnIdx = r.cur.columns.indexOf("dev_no")
+                if (dnIdx < 0) return
+                val e0 = parseEventArray(el, r.cur)
+                val md = s.dnMap[e0.devNo] ?: return
+                if (md == deviceNo) return
+                val e = e0.copy(devNo = md)
+                if (knownEvent(e.key())) return
+                val outA = if (dnIdx < el.size) el.withReplaced(dnIdx, JsonPrimitive(md)) else el
+                appendToMonth(month, outA.toString(), false, null)
+                applyEventToState(e)
+                s.received++
+            }
+            else -> {}
         }
     }
 
@@ -798,7 +748,7 @@ class Store(val root: File) {
         val groups = LinkedHashMap<String, MutableList<Event>>()
         for (e in live.values) {
             val sig = listOf(e.eventDatetime, e.subject, costStr(e.cost),
-                e.people ?: "", e.volume ?: "", e.comment ?: "").joinToString("\u0001")
+                e.people ?: "", e.volume ?: "", e.comment ?: "").joinToString("")
             groups.getOrPut(sig) { ArrayList() }.add(e)
         }
         var n = 0
@@ -813,5 +763,11 @@ class Store(val root: File) {
         return n
     }
 
-    fun syncCommit(peerDn: Int) = saveSyncIndex(peerDn, fileStates())
+    fun syncCommit(peerDn: Int) {
+        // Состояние собеседника: после успешного обмена у него есть все наши месячные
+        // файлы целиком — фиксируем их текущие размеры как его offset.
+        val off = HashMap<Int, Long>()
+        for ((yyyymm, f) in enumerateMonths()) off[yyyymm] = f.length()
+        saveSyncIndex(peerDn, off)
+    }
 }
