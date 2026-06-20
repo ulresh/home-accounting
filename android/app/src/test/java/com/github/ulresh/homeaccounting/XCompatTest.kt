@@ -3,10 +3,7 @@ package com.github.ulresh.homeaccounting
 import com.github.ulresh.homeaccounting.model.CatalogEntry
 import com.github.ulresh.homeaccounting.model.ListManifest
 import com.github.ulresh.homeaccounting.model.Store
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonPrimitive
+import com.github.ulresh.homeaccounting.model.Jk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -88,21 +85,15 @@ class XCompatTest {
         while (pos < all.size) {
             val hdr = line()
             if (hdr.isEmpty()) continue
-            val a = Json.parseToJsonElement(hdr).jsonArray
-            val kind = a[0].jsonPrimitive.content
+            val a = Jk.parse(hdr)
+            val kind = a.get(0).asText()
             if (kind == "end") break
             var month = 0
             val size: Int
-            if (kind == "event-tail") { month = a[1].jsonPrimitive.int; size = a[3].jsonPrimitive.int }
-            else size = a[1].jsonPrimitive.int
-            s.syncRecvBegin(kind, month, true)
-            var rem = size
-            while (rem > 0) {
-                val chunk = minOf(rem, 4096)
-                s.syncRecvFeed(all, pos, chunk)
-                pos += chunk; rem -= chunk
-            }
-            s.syncRecvFinish()
+            if (kind == "event-tail") { month = a.get(1).asInt(); size = a.get(3).asInt() }
+            else size = a.get(1).asInt()
+            s.syncReceiveBlob(kind, month, true, java.io.ByteArrayInputStream(all, pos, size))
+            pos += size
             if (pos < all.size && all[pos].toInt() == '\n'.code) pos++
         }
         s.syncEnd()

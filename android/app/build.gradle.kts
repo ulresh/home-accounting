@@ -58,9 +58,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // Версия согласована со встроенным в AGP Kotlin 2.2.10 (метаданные читаются компилятором).
-    // Используется только runtime-API JSON (JsonElement/builders) — плагин сериализации не нужен.
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    // JSON: Jackson streaming — даёт инкрементный (потоковый) разбор по значениям.
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
 
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")

@@ -664,3 +664,30 @@ Fixes applied: `sendItems` now skips opening empty/missing files (`fileLen > 0 &
 
 ==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-19 22:24:12 | завершено 2026-06-19 22:25:14 ====
 You've hit your session limit · resets 9pm (UTC)
+
+
+
+
+==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-20 05:15:33 | завершено 2026-06-20 05:27:31 ====
+I'll wait for the compile to finish and notify me, rather than polling. Once Jackson resolves and compilation passes, I'll run the full test suite (with a timeout) and then the desktop↔Android cross-platform fixtures both directions.
+
+
+
+
+==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-20 05:33:22 | завершено 2026-06-20 05:46:09 ====
+Done — and now genuinely verified. The remote uses Jackson (4 imports, 0 kotlinx), the stray dir is gone.
+
+## Final state (all re-verified against the **real** Jackson code)
+
+**The library swap:** Android's hand-rolled `JsonlByteSplitter` is replaced by **Jackson streaming** (`ObjectMapper.readValues(parser, JsonNode)` — pulls values from the stream one at a time, never buffering the whole file/blob); network receive is pull-based through a `BoundedInputStream` (with `AUTO_CLOSE_SOURCE` off). `kotlinx-serialization-json` is removed entirely.
+
+**Android (Jackson):**
+- `:app:testDebugUnitTest` → **StoreSyncTest 6/6** (incl. `cancelInterrupts`), 0 failures, 37s, no hang.
+- Cross-platform: **desktop reads Android-Jackson fixture 14/14**; **Android-Jackson reads desktop fixture** crossVerify 0 failures (both on-disk format and wire framing, both directions).
+- **Release APK** built — 14.2 MB, Jackson classes bundled, no kotlinx.
+
+**Desktop (unchanged this turn, already green):** 41/41 `syncv2test` (incl. cancel), `guitest` UI-cancel, release binary 946 KB.
+
+## I also caught and fixed two things you flagged
+1. **The hung tests** — you were right. Root cause: a fresh peer emitted a 0-byte list item; Android `sendItems` opened the missing file → threw → client closed before flushing → server's `readLine` returned `""` at EOF and `if (line.isEmpty()) continue` busy-looped at ~98% CPU (found via `jstack`). Fixed: guard empty/missing files, and `readLine` throws on EOF. Stale background waits and hung remote processes were killed.
+2. **A push-path bug I introduced** — my first Jackson pushes used `cd .../home-accounting` instead of `.../home-accounting/android`, so they landed in a stray `app/` dir and the real `android/app` kept the old kotlinx code. That means my *first* round of "Jackson" green results was actually the old code passing. I detected it via md5 mismatch, fixed the paths, removed the stray dir + old splitter, and re-ran **everything** above against the genuine Jackson build. Recorded the gotcha in memory so it won't recur.

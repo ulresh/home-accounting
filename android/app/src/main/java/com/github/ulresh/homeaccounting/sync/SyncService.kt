@@ -1,10 +1,10 @@
 package com.github.ulresh.homeaccounting.sync
 
+import com.github.ulresh.homeaccounting.model.Jk
 import com.github.ulresh.homeaccounting.model.ListManifest
 import com.github.ulresh.homeaccounting.model.FileState
 import com.github.ulresh.homeaccounting.model.Store
 import com.github.ulresh.homeaccounting.model.SyncSendItem
-import kotlinx.serialization.json.*
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -21,19 +21,15 @@ data class PairInfo(
     val code: String,
     val db: String,
 ) {
-    fun toJson(): String = buildJsonObject {
-        put("ip", ip); put("port", port); put("code", code); put("db", db)
-    }.toString()
+    fun toJson(): String {
+        val o = Jk.obj(); o.put("ip", ip); o.put("port", port); o.put("code", code); o.put("db", db)
+        return o.toString()
+    }
 
     companion object {
         fun fromJson(s: String): PairInfo = runCatching {
-            val o = Json.parseToJsonElement(s).jsonObject
-            PairInfo(
-                ip = o["ip"]!!.jsonPrimitive.content,
-                port = o["port"]!!.jsonPrimitive.int,
-                code = o["code"]!!.jsonPrimitive.content,
-                db = o["db"]?.jsonPrimitive?.content ?: "",
-            )
+            val o = Jk.parse(s)
+            PairInfo(o.get("ip").asText(), o.get("port").asInt(), o.get("code").asText(), o.get("db")?.asText() ?: "")
         }.getOrElse { PairInfo("", 0, "", "") }
     }
 }
@@ -48,8 +44,6 @@ data class SyncResult(
 )
 
 typealias ConfirmFn = (String) -> Boolean
-
-private val J = Json { ignoreUnknownKeys = true }
 
 internal fun localIPv4(): String =
     runCatching {
@@ -68,6 +62,22 @@ internal fun randomCode(n: Int): String {
 private fun peerPubkey(s: SSLSocket): String = runCatching {
     Crypto.pubkeyOf(s.session.peerCertificates[0])
 }.getOrDefault("")
+
+// Ограничить чтение ровно `remaining` байтами; нижележащий сокет НЕ закрываем.
+private class BoundedInputStream(private val src: InputStream, private var remaining: Int) : InputStream() {
+    override fun read(): Int {
+        if (remaining <= 0) return -1
+        val b = src.read(); if (b >= 0) remaining--
+        return b
+    }
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (remaining <= 0) return -1
+        val n = src.read(b, off, minOf(len, remaining))
+        if (n > 0) remaining -= n
+        return n
+    }
+    override fun close() {}
+}
 
 // ---- покадровый ввод/вывод ----
 private fun writeLine(out: OutputStream, line: String) {
@@ -99,13 +109,12 @@ private fun readExact(ins: InputStream, n: Int): ByteArray {
 // Отдать блоки потоково: читаем файл блоками с диска и сразу пишем в сеть.
 private fun sendItems(out: OutputStream, items: List<SyncSendItem>) {
     for (it in items) {
-        val header = if (it.kind == "event-tail")
-            buildJsonArray { add("event-tail"); add(it.month); add(it.offset); add(it.frameSize()) }
-        else
-            buildJsonArray { add(it.kind); add(it.frameSize()) }
+        val header = Jk.arr()
+        if (it.kind == "event-tail") { header.add("event-tail"); header.add(it.month); header.add(it.offset); header.add(it.frameSize()) }
+        else { header.add(it.kind); header.add(it.frameSize()) }
         out.write((header.toString() + "\n").toByteArray(Charsets.UTF_8))
         if (it.prepend.isNotEmpty()) out.write(it.prepend.toByteArray(Charsets.UTF_8))
-        if (it.fileLen > 0 && it.path.exists()) {                 // пустой/отсутствующий файл не открываем
+        if (it.fileLen > 0 && it.path.exists()) {
             it.path.inputStream().use { ins ->
                 var toSkip = it.fileFrom.toLong()
                 while (toSkip > 0) { val s = ins.skip(toSkip); if (s <= 0) break; toSkip -= s }
@@ -124,53 +133,47 @@ private fun sendItems(out: OutputStream, items: List<SyncSendItem>) {
     out.flush()
 }
 
-// Принять блоки до ["end"], каждый сразу (по блокам сети) скармливать в store.
+// Принять блоки до ["end"]; данные блока разбираются потоково (Jackson из BoundedInputStream).
 private fun recvItems(ins: InputStream, store: Store, replaceLists: Boolean) {
     while (true) {
         val line = readLine(ins)
         if (line.isEmpty()) continue
-        val a = J.parseToJsonElement(line).jsonArray
-        val kind = a[0].jsonPrimitive.content
+        val a = Jk.parse(line)
+        val kind = a.get(0).asText()
         if (kind == "end") break
         var month = 0
         val size: Int
-        if (kind == "event-tail") { month = a[1].jsonPrimitive.int; size = a[3].jsonPrimitive.int }
-        else size = a[1].jsonPrimitive.int
-        store.syncRecvBegin(kind, month, replaceLists)
-        var rem = size
-        val block = ByteArray(16384)
-        while (rem > 0) {
-            val r = ins.read(block, 0, minOf(rem, block.size))
-            if (r < 0) throw java.io.IOException("short read")
-            store.syncRecvFeed(block, 0, r); rem -= r
-        }
-        store.syncRecvFinish()
+        if (kind == "event-tail") { month = a.get(1).asInt(); size = a.get(3).asInt() }
+        else size = a.get(1).asInt()
+        store.syncReceiveBlob(kind, month, replaceLists, BoundedInputStream(ins, size))
         readExact(ins, 1)   // завершающий '\n'
     }
 }
 
-// ---- манифест справочников (состояние собеседника) ----
-private fun manifestJson(m: ListManifest): String = buildJsonObject {
-    put("manifest", buildJsonObject {
-        put("people", buildJsonArray { add(m.people.size); add(m.people.sha1) })
-        put("catalog", buildJsonArray { add(m.catalog.size); add(m.catalog.sha1) })
-        put("device", buildJsonArray { add(m.device.size); add(m.device.sha1) })
-    })
-}.toString()
+// ---- манифест справочников ----
+private fun manifestJson(m: ListManifest): String {
+    val o = Jk.obj()
+    val mo = o.putObject("manifest")
+    mo.putArray("people").add(m.people.size).add(m.people.sha1)
+    mo.putArray("catalog").add(m.catalog.size).add(m.catalog.sha1)
+    mo.putArray("device").add(m.device.size).add(m.device.sha1)
+    return o.toString()
+}
 private fun manifestParse(line: String): ListManifest = runCatching {
-    val mo = J.parseToJsonElement(line).jsonObject["manifest"]!!.jsonObject
+    val mo = Jk.parse(line).get("manifest") ?: return ListManifest()
     fun rd(k: String): FileState {
-        val a = mo[k]?.jsonArray ?: return FileState()
-        val sha = if (a.size > 1 && a[1] is JsonPrimitive && (a[1] as JsonPrimitive).isString) a[1].jsonPrimitive.content else ""
-        return FileState(a[0].jsonPrimitive.intOrNull ?: 0, sha)
+        val a = mo.get(k); if (a == null || !a.isArray) return FileState()
+        val sha = if (a.size() > 1 && a.get(1).isTextual) a.get(1).asText() else ""
+        return FileState(a.get(0).asInt(), sha)
     }
     ListManifest(rd("people"), rd("catalog"), rd("device"))
 }.getOrDefault(ListManifest())
 
-private fun summaryLine(received: Int): String =
-    buildJsonObject { put("summary", buildJsonObject { put("received", received) }) }.toString()
+private fun summaryLine(received: Int): String {
+    val o = Jk.obj(); o.putObject("summary").put("received", received); return o.toString()
+}
 private fun summaryReceived(line: String): Int =
-    J.parseToJsonElement(line).jsonObject["summary"]!!.jsonObject["received"]!!.jsonPrimitive.int
+    Jk.parse(line).get("summary").get("received").asInt()
 
 // ---------------- Сервер ----------------
 class SyncServer(private val store: Store) {
@@ -204,18 +207,19 @@ class SyncServer(private val store: Store) {
             val ins = BufferedInputStream(s.inputStream)
             val out = BufferedOutputStream(s.outputStream)
 
-            val hello = J.parseToJsonElement(readLine(ins)).jsonObject["hello"]!!.jsonObject
-            val clientDb = hello["db"]!!.jsonPrimitive.content
-            val clientCode = hello["code"]!!.jsonPrimitive.content
-            val clientDevNo = hello["device_no"]?.jsonPrimitive?.intOrNull ?: 0
-            val clientHasData = hello["has_data"]?.jsonPrimitive?.booleanOrNull ?: false
+            val hello = Jk.parse(readLine(ins)).get("hello")
+            val clientDb = hello.get("db").asText()
+            val clientCode = hello.get("code").asText()
+            val clientDevNo = hello.get("device_no")?.asInt() ?: 0
+            val clientHasData = hello.get("has_data")?.asBoolean() ?: false
 
             if (clientCode != code) {
                 writeLine(out, """{"error":"bad_code"}""")
                 return SyncResult(error = "bad_code", peerDb = clientDb, peerPubkey = peer)
             }
             if (clientDb != store.database) {
-                writeLine(out, buildJsonObject { put("error", "db_mismatch"); put("db", store.database) }.toString())
+                val e = Jk.obj(); e.put("error", "db_mismatch"); e.put("db", store.database)
+                writeLine(out, e.toString())
                 return SyncResult(error = "db_mismatch", peerDb = clientDb, peerPubkey = peer)
             }
             if (clientDevNo == store.deviceNo && !store.hasData() && clientHasData) {
@@ -230,11 +234,11 @@ class SyncServer(private val store: Store) {
                 store.reserveDeviceNo(peer, clientDevNo, "peer")
             }
 
-            writeLine(out, buildJsonObject {
-                put("ok", true); put("db", store.database)
-                put("device_no", store.deviceNo); put("pubkey", store.myPubkey)
-                put("max_dn", ackMaxDn)
-            }.toString())
+            val ok = Jk.obj()
+            ok.put("ok", true); ok.put("db", store.database)
+            ok.put("device_no", store.deviceNo); ok.put("pubkey", store.myPubkey)
+            ok.put("max_dn", ackMaxDn)
+            writeLine(out, ok.toString())
 
             // обмен манифестами справочников
             writeLine(out, manifestJson(store.listManifest()))
@@ -279,22 +283,21 @@ class SyncClient(private val store: Store) {
             val ins = BufferedInputStream(s.inputStream)
             val out = BufferedOutputStream(s.outputStream)
 
-            writeLine(out, buildJsonObject {
-                put("hello", buildJsonObject {
-                    put("db", store.database); put("device_no", store.deviceNo)
-                    put("pubkey", store.myPubkey); put("code", info.code)
-                    put("has_data", store.hasData())
-                })
-            }.toString())
+            val helloMsg = Jk.obj()
+            val hello = helloMsg.putObject("hello")
+            hello.put("db", store.database); hello.put("device_no", store.deviceNo)
+            hello.put("pubkey", store.myPubkey); hello.put("code", info.code)
+            hello.put("has_data", store.hasData())
+            writeLine(out, helloMsg.toString())
 
-            val ack = J.parseToJsonElement(readLine(ins)).jsonObject
-            ack["error"]?.let { err ->
-                val peerDb = ack["db"]?.jsonPrimitive?.content ?: ""
-                return SyncResult(error = err.jsonPrimitive.content, peerDb = peerDb, peerPubkey = peer)
+            val ack = Jk.parse(readLine(ins))
+            ack.get("error")?.let { err ->
+                val peerDb = ack.get("db")?.asText() ?: ""
+                return SyncResult(error = err.asText(), peerDb = peerDb, peerPubkey = peer)
             }
-            val peerDb = ack["db"]?.jsonPrimitive?.content ?: ""
-            val serverDevNo = ack["device_no"]?.jsonPrimitive?.intOrNull ?: 0
-            val serverMaxDn = ack["max_dn"]?.jsonPrimitive?.intOrNull ?: serverDevNo
+            val peerDb = ack.get("db")?.asText() ?: ""
+            val serverDevNo = ack.get("device_no")?.asInt() ?: 0
+            val serverMaxDn = ack.get("max_dn")?.asInt() ?: serverDevNo
             if (serverDevNo == store.deviceNo && !store.hasData()) {
                 store.renumberSelf(maxOf(store.maxDeviceNo(), serverMaxDn) + 1)
             }

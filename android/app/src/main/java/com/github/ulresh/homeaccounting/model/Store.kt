@@ -1,8 +1,12 @@
 package com.github.ulresh.homeaccounting.model
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.node.DoubleNode
+import com.fasterxml.jackson.databind.node.IntNode
+import com.fasterxml.jackson.databind.node.LongNode
 import com.github.ulresh.homeaccounting.sync.Crypto
-import kotlinx.serialization.json.*
 import java.io.File
+import java.io.InputStream
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -15,6 +19,7 @@ import kotlin.math.max
 // Центральное хранилище. root — каталог данных приложения (Context.filesDir).
 // События — только дозапись; справочники — атомарная перезапись. raw в памяти не
 // держим: при загрузке удаления применяются на лету (по месяцам, по порядку).
+// Разбор JSON — потоковый, через Jackson (см. Jk): файл/блок целиком не грузим.
 class Store(val root: File) {
 
     var database: String = "Основная"
@@ -24,8 +29,6 @@ class Store(val root: File) {
     var myPubkey: String = ""
         private set
     private var keyStore: KeyStore? = null
-
-    private val json = Json { ignoreUnknownKeys = true }
 
     private val peopleList = ArrayList<String>()
     private val catalogList = ArrayList<CatalogEntry>()
@@ -67,16 +70,10 @@ class Store(val root: File) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
     // ---------- ввод/вывод ----------
-    // Читаем файл ПОТОКОМ: блоками фиксированного размера, сразу скармливая их
-    // инкрементному разборщику (JsonlByteSplitter). Целиком файл в память не грузим.
-    private fun readValues(f: File, onValue: (JsonElement) -> Unit) {
+    // Файл читаем потоково (Jackson читает поток блоками сам), без загрузки целиком.
+    private fun readValues(f: File, onValue: (JsonNode) -> Unit) {
         if (!f.exists()) return
-        val sp = JsonlByteSplitter(onValue)
-        f.inputStream().use { ins ->
-            val block = ByteArray(64 * 1024)
-            while (true) { val r = ins.read(block); if (r < 0) break; sp.feed(block, 0, r) }
-        }
-        sp.finish()
+        f.inputStream().use { Jk.forEachValue(it, onValue) }
     }
 
     private fun appendLine(f: File, line: String) {
@@ -109,14 +106,18 @@ class Store(val root: File) {
         listOf("event_datetime", "subject", "cost", "edit_datetime", "rec_no", "dev_no", "people", "volume", "comment"),
         listOf("edit_datetime", "rec_no", "dev_no"),
     )
-    private fun headerLineFor(sc: Schema): String = buildJsonObject {
-        put("header", buildJsonArray { sc.columns.forEach { add(it) } })
-        put("reference", buildJsonArray { sc.reference.forEach { add(it) } })
-    }.toString()
+    private fun headerLineFor(sc: Schema): String {
+        val o = Jk.obj()
+        val h = o.putArray("header"); sc.columns.forEach { h.add(it) }
+        val r = o.putArray("reference"); sc.reference.forEach { r.add(it) }
+        return o.toString()
+    }
     private fun canonicalHeaderLine(): String = headerLineFor(canonicalSchema())
-    private fun schemaFromHeader(o: JsonObject): Schema {
-        val cols = (o["header"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } ?: emptyList()
-        val ref = (o["reference"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } ?: emptyList()
+    private fun schemaFromHeader(o: JsonNode): Schema {
+        val cols = ArrayList<String>()
+        o.get("header")?.let { if (it.isArray) it.forEach { e -> if (e.isTextual) cols.add(e.asText()) } }
+        val ref = ArrayList<String>()
+        o.get("reference")?.let { if (it.isArray) it.forEach { e -> if (e.isTextual) ref.add(e.asText()) } }
         return Schema(
             if (cols.isEmpty()) canonicalSchema().columns else cols,
             if (ref.isEmpty()) canonicalSchema().reference else ref,
@@ -124,36 +125,36 @@ class Store(val root: File) {
     }
 
     private data class RecRef(val edit: String, val rn: Int, val dn: Int)
-    private fun parseRef(a: JsonArray, ref: List<String>): RecRef {
+    private fun parseRef(a: JsonNode, ref: List<String>): RecRef {
         var edit = ""; var rn = 0; var dn = 0
         for (i in ref.indices) {
-            if (i >= a.size) break
+            if (i >= a.size()) break
             when (ref[i]) {
-                "edit_datetime" -> edit = a[i].jsonPrimitive.content
-                "rec_no" -> rn = a[i].jsonPrimitive.intOrNull ?: 0
-                "dev_no" -> dn = a[i].jsonPrimitive.intOrNull ?: 0
+                "edit_datetime" -> edit = a.get(i).asText()
+                "rec_no" -> rn = a.get(i).asInt()
+                "dev_no" -> dn = a.get(i).asInt()
             }
         }
         return RecRef(edit, rn, dn)
     }
     private fun refIndexOfDn(ref: List<String>) = ref.indexOf("dev_no")
 
-    private fun parseEventArray(a: JsonArray, s: Schema): Event {
+    private fun parseEventArray(a: JsonNode, s: Schema): Event {
         var ed = ""; var subj = ""; var cost = 0.0; var edit = ""; var rn = 0; var dn = 0
         var people: String? = null; var volume: String? = null; var comment: String? = null
         for (i in s.columns.indices) {
-            if (i >= a.size) break
-            val v = a[i]
+            if (i >= a.size()) break
+            val v = a.get(i)
             when (s.columns[i]) {
-                "event_datetime" -> ed = v.jsonPrimitive.content
-                "subject" -> subj = v.jsonPrimitive.content
-                "cost" -> cost = v.jsonPrimitive.doubleOrNull ?: 0.0
-                "edit_datetime" -> edit = v.jsonPrimitive.content
-                "rec_no" -> rn = v.jsonPrimitive.intOrNull ?: 0
-                "dev_no" -> dn = v.jsonPrimitive.intOrNull ?: 0
-                "people" -> if (v is JsonPrimitive && v.isString) people = v.content
-                "volume" -> if (v is JsonPrimitive && v.isString) volume = v.content
-                "comment" -> if (v is JsonPrimitive && v.isString) comment = v.content
+                "event_datetime" -> ed = v.asText()
+                "subject" -> subj = v.asText()
+                "cost" -> cost = v.asDouble()
+                "edit_datetime" -> edit = v.asText()
+                "rec_no" -> rn = v.asInt()
+                "dev_no" -> dn = v.asInt()
+                "people" -> if (v.isTextual) people = v.asText()
+                "volume" -> if (v.isTextual) volume = v.asText()
+                "comment" -> if (v.isTextual) comment = v.asText()
             }
         }
         return Event(ed, subj, cost, edit, rn, dn, people, volume, comment)
@@ -167,29 +168,33 @@ class Store(val root: File) {
         return RecRef(k.substring(0, p1), k.substring(p1 + 1, p2).toIntOrNull() ?: 0, k.substring(p2 + 1).toIntOrNull() ?: 0)
     }
 
-    private fun JsonArray.withReplaced(idx: Int, v: JsonElement): JsonArray =
-        buildJsonArray { this@withReplaced.forEachIndexed { i, e -> add(if (i == idx) v else e) } }
+    // Копия массива с заменой одного элемента (для DN map «как получили»).
+    private fun JsonNode.withReplaced(idx: Int, v: JsonNode): JsonNode {
+        val out = Jk.arr()
+        for (i in 0 until this.size()) out.add(if (i == idx) v else this.get(i))
+        return out
+    }
 
     // ---------- сериализация события ----------
-    private fun costElement(c: Double): JsonElement =
-        if (!c.isNaN() && !c.isInfinite() && c == floor(c)) JsonPrimitive(c.toLong()) else JsonPrimitive(c)
+    private fun costElement(c: Double): JsonNode =
+        if (!c.isNaN() && !c.isInfinite() && c == floor(c)) LongNode.valueOf(c.toLong()) else DoubleNode.valueOf(c)
     private fun costStr(c: Double): String = costElement(c).toString()
 
     private fun eventToLine(e: Event): String {
         val hasC = !e.comment.isNullOrEmpty()
         val hasV = !e.volume.isNullOrEmpty()
         val hasP = !e.people.isNullOrEmpty()
-        return buildJsonArray {
-            add(e.eventDatetime); add(e.subject); add(costElement(e.cost))
-            add(e.editDatetime); add(e.recNo); add(e.devNo)
-            if (hasP || hasV || hasC) {
-                if (hasP) add(e.people!!) else add(JsonNull)
-                if (hasV || hasC) {
-                    if (hasV) add(e.volume!!) else add(JsonNull)
-                    if (hasC) add(e.comment!!)
-                }
+        val a = Jk.arr()
+        a.add(e.eventDatetime); a.add(e.subject); a.add(costElement(e.cost))
+        a.add(e.editDatetime); a.add(e.recNo); a.add(e.devNo)
+        if (hasP || hasV || hasC) {
+            if (hasP) a.add(e.people!!) else a.addNull()
+            if (hasV || hasC) {
+                if (hasV) a.add(e.volume!!) else a.addNull()
+                if (hasC) a.add(e.comment!!)
             }
-        }.toString()
+        }
+        return a.toString()
     }
 
     // ---------- загрузка ----------
@@ -204,32 +209,27 @@ class Store(val root: File) {
 
     private fun loadConfig() {
         val dbs = ArrayList<String>()
-        readValues(File(root, "database.jsonl")) { el ->
-            (el as? JsonPrimitive)?.let { if (it.isString) dbs.add(it.content) }
-        }
+        readValues(File(root, "database.jsonl")) { el -> if (el.isTextual) dbs.add(el.asText()) }
         readValues(File(root, "config.json")) { el ->
-            (el as? JsonObject)?.let { o ->
-                o["current_database"]?.jsonPrimitive?.content?.let { database = it }
-                o["current_device_no"]?.jsonPrimitive?.intOrNull?.let { deviceNo = it }
+            if (el.isObject) {
+                el.get("current_database")?.let { if (it.isTextual) database = it.asText() }
+                el.get("current_device_no")?.let { if (it.isNumber) deviceNo = it.asInt() }
             }
         }
         if (dbs.isNotEmpty() && !dbs.contains(database)) database = dbs.first()
-        if (dbs.isEmpty()) writeAtomic(File(root, "database.jsonl"), JsonPrimitive(database).toString() + "\n")
+        if (dbs.isEmpty()) writeAtomic(File(root, "database.jsonl"), Jk.quote(database) + "\n")
     }
 
     private fun saveConfig() {
-        val o = buildJsonObject {
-            put("current_database", database)
-            put("current_device_no", deviceNo)
-        }
+        val o = Jk.obj()
+        o.put("current_database", database)
+        o.put("current_device_no", deviceNo)
         writeAtomic(File(root, "config.json"), o.toString() + "\n")
     }
 
     fun databases(): List<String> {
         val dbs = ArrayList<String>()
-        readValues(File(root, "database.jsonl")) { el ->
-            (el as? JsonPrimitive)?.let { if (it.isString) dbs.add(it.content) }
-        }
+        readValues(File(root, "database.jsonl")) { el -> if (el.isTextual) dbs.add(el.asText()) }
         if (dbs.isEmpty()) dbs.add(database)
         return dbs
     }
@@ -239,8 +239,7 @@ class Store(val root: File) {
         if (!dbs.contains(name)) {
             if (!create) return
             dbs.add(name)
-            val content = dbs.joinToString("\n") { JsonPrimitive(it).toString() } + "\n"
-            writeAtomic(File(root, "database.jsonl"), content)
+            writeAtomic(File(root, "database.jsonl"), dbs.joinToString("\n") { Jk.quote(it) } + "\n")
         }
         database = name
         deviceNo = 0
@@ -254,49 +253,42 @@ class Store(val root: File) {
     private fun loadDevices() {
         deviceList.clear()
         readValues(File(dbDir(), "device.jsonl")) { el ->
-            runCatching {
-                val a = el.jsonArray
-                val no = a[0].jsonPrimitive.int
-                val pk = a[1].jsonPrimitive.content
-                val nm = if (a.size > 2) a[2].jsonPrimitive.content else ""
+            if (el.isArray && el.size() >= 2) {
+                val no = el.get(0).asInt()
+                val pk = el.get(1).asText()
+                val nm = if (el.size() > 2) el.get(2).asText() else ""
                 deviceList.add(Device(no, pk, nm))
             }
         }
     }
     private fun saveDevices() {
         val content = deviceList.joinToString("\n") { d ->
-            buildJsonArray { add(d.no); add(d.pubkey); if (d.name.isNotEmpty()) add(d.name) }.toString()
+            val a = Jk.arr(); a.add(d.no); a.add(d.pubkey); if (d.name.isNotEmpty()) a.add(d.name); a.toString()
         } + "\n"
         writeAtomic(File(dbDir(), "device.jsonl"), content)
     }
 
     private fun loadPeople() {
         peopleList.clear()
-        readValues(File(dbDir(), "people.jsonl")) { el ->
-            (el as? JsonPrimitive)?.let { if (it.isString) peopleList.add(it.content) }
-        }
+        readValues(File(dbDir(), "people.jsonl")) { el -> if (el.isTextual) peopleList.add(el.asText()) }
     }
     private fun savePeople() {
-        val content = peopleList.joinToString("\n") { JsonPrimitive(it).toString() } + "\n"
-        writeAtomic(File(dbDir(), "people.jsonl"), content)
+        writeAtomic(File(dbDir(), "people.jsonl"), peopleList.joinToString("\n") { Jk.quote(it) } + "\n")
     }
 
     private fun loadCatalog() {
         catalogList.clear()
         readValues(File(dbDir(), "catalog.jsonl")) { el ->
-            runCatching {
-                val a = el.jsonArray
-                if (a.isNotEmpty()) {
-                    val cat = a[0].jsonPrimitive.content
-                    val items = a.drop(1).map { it.jsonPrimitive.content }
-                    catalogList.add(CatalogEntry(cat, items))
-                }
+            if (el.isArray && el.size() > 0) {
+                val cat = el.get(0).asText()
+                val items = (1 until el.size()).map { el.get(it).asText() }
+                catalogList.add(CatalogEntry(cat, items))
             }
         }
     }
     private fun saveCatalog() {
         val content = catalogList.joinToString("\n") { e ->
-            buildJsonArray { add(e.category); e.items.forEach { add(it) } }.toString()
+            val a = Jk.arr(); a.add(e.category); e.items.forEach { a.add(it) }; a.toString()
         } + "\n"
         writeAtomic(File(dbDir(), "catalog.jsonl"), content)
     }
@@ -327,17 +319,13 @@ class Store(val root: File) {
             var cur = canonicalSchema()
             var sawHeader = false
             readValues(f) { el ->
-                when (el) {
-                    is JsonObject -> {
-                        if (el.containsKey("header")) { cur = schemaFromHeader(el); monthSchema[yyyymm] = cur; sawHeader = true }
-                        else {
-                            val del = el["delete"] as? JsonArray
-                            if (del != null) { val t = parseRef(del, cur.reference); applyDeleteToState(keyStr(t.edit, t.rn, t.dn)); anyEventLines = true }
-                        }
+                if (el.isObject) {
+                    if (el.has("header")) { cur = schemaFromHeader(el); monthSchema[yyyymm] = cur; sawHeader = true }
+                    else {
+                        val del = el.get("delete")
+                        if (del != null && del.isArray) { val t = parseRef(del, cur.reference); applyDeleteToState(keyStr(t.edit, t.rn, t.dn)); anyEventLines = true }
                     }
-                    is JsonArray -> { val e = parseEventArray(el, cur); anyEventLines = true; applyEventToState(e) }
-                    else -> {}
-                }
+                } else if (el.isArray) { val e = parseEventArray(el, cur); anyEventLines = true; applyEventToState(e) }
             }
             if (!sawHeader && !monthSchema.containsKey(yyyymm)) monthSchema[yyyymm] = canonicalSchema()
         }
@@ -389,13 +377,12 @@ class Store(val root: File) {
         if (s != null) { ensureDeleteKeysLoaded(); if (s.deleteKeys.contains(dkey)) return false }
         val stamp = nowStamp()
         val rn = allocRecNo(stamp)
-        val ym = yyyymmOf(stamp)
+        val ym = yyyymmOf(tgtEdit)
         ensureCanonicalHeader(ym)
-        val o = buildJsonObject {
-            put("delete", buildJsonArray { add(tgtEdit); add(tgtRn); add(tgtDn) })
-            put("this", buildJsonArray { add(stamp); add(rn); add(deviceNo) })
-            if (update) put("update", true)
-        }
+        val o = Jk.obj()
+        val del = o.putArray("delete"); del.add(tgtEdit); del.add(tgtRn); del.add(tgtDn)
+        val ths = o.putArray("this"); ths.add(stamp); ths.add(rn); ths.add(deviceNo)
+        if (update) o.put("update", true)
         appendToMonth(ym, o.toString(), false, null)
         s?.deleteKeys?.add(dkey)
         return true
@@ -411,7 +398,7 @@ class Store(val root: File) {
             people = people?.ifBlank { null }, volume = volume?.ifBlank { null },
             comment = comment?.ifBlank { null },
         )
-        val ym = yyyymmOf(edit)
+        val ym = yyyymmOf(eventDatetime)
         ensureCanonicalHeader(ym)
         appendToMonth(ym, eventToLine(e), false, null)
         applyEventToState(e)
@@ -487,7 +474,6 @@ class Store(val root: File) {
     }
 
     // ---------- идентичность ----------
-    // SSLContext с нашей идентичностью (для синхронизации).
     fun sslContext(): SSLContext = Crypto.sslContext(keyStore ?: error("identity not initialized"))
 
     fun ensureIdentity() {
@@ -551,7 +537,6 @@ class Store(val root: File) {
         var headerReceived = false
         val people = ArrayList<String>()
         val catalog = ArrayList<CatalogEntry>()
-        lateinit var splitter: JsonlByteSplitter
     }
     private class SyncSession(val peerDn: Int) {
         var offsets: Map<Int, Long> = emptyMap()   // СОСТОЯНИЕ СОБЕСЕДНИКА: yyyymm -> сколько наших байт у него
@@ -559,7 +544,6 @@ class Store(val root: File) {
         val deleteKeys = HashSet<String>()
         var deleteKeysLoaded = false
         var received = 0
-        var recv: RecvState? = null
     }
     private var sync: SyncSession? = null
 
@@ -573,18 +557,13 @@ class Store(val root: File) {
     fun loadSyncIndex(peerDn: Int): HashMap<Int, Long> {
         val off = HashMap<Int, Long>()
         readValues(syncIndexPath(peerDn)) { el ->
-            (el as? JsonArray)?.let { a ->
-                if (a.size >= 2) {
-                    val k = (a[0] as? JsonPrimitive)?.intOrNull
-                    if (k != null) off[k] = a[1].jsonPrimitive.longOrNull ?: 0L
-                }
-            }
+            if (el.isArray && el.size() >= 2 && el.get(0).isNumber) off[el.get(0).asInt()] = el.get(1).asLong()
         }
         return off
     }
     fun saveSyncIndex(peerDn: Int, off: Map<Int, Long>) {
         val sb = StringBuilder()
-        for ((month, o) in off) sb.append(buildJsonArray { add(month); add(o) }.toString()).append("\n")
+        for ((month, o) in off) { val a = Jk.arr(); a.add(month); a.add(o); sb.append(a.toString()).append("\n") }
         writeAtomic(syncIndexPath(peerDn), sb.toString())
     }
 
@@ -602,13 +581,14 @@ class Store(val root: File) {
         for ((_, f) in enumerateMonths()) {
             var cur = canonicalSchema()
             readValues(f) { el ->
-                if (el is JsonObject) {
-                    if (el.containsKey("header")) cur = schemaFromHeader(el)
+                if (el.isObject) {
+                    if (el.has("header")) cur = schemaFromHeader(el)
                     else {
-                        val del = el["delete"] as? JsonArray
-                        if (del != null) {
+                        val del = el.get("delete")
+                        if (del != null && del.isArray) {
                             val t = parseRef(del, cur.reference)
-                            val upd = (el["update"] as? JsonPrimitive)?.booleanOrNull == true
+                            val u = el.get("update")
+                            val upd = u != null && u.isBoolean && u.asBoolean()
                             s.deleteKeys.add(keyStr(t.edit, t.rn, t.dn) + "|" + (if (upd) "1" else "0"))
                         }
                     }
@@ -650,97 +630,83 @@ class Store(val root: File) {
         return out
     }
 
-    // Потоковый приём блока: begin -> feed(блоки сети) -> finish (инкрементно).
-    fun syncRecvBegin(kind: String, month: Int, replaceLists: Boolean) {
-        val s = sync ?: return
+    // Потоковый приём блока: Jackson читает поток инкрементно, значения применяются
+    // сразу. ins ограничен размером блока (закрытие сокета не делаем).
+    fun syncReceiveBlob(kind: String, month: Int, replaceLists: Boolean, ins: InputStream) {
+        if (sync == null) return
         val r = RecvState(kind, month, replaceLists)
         r.cur = canonicalSchema()
-        r.splitter = JsonlByteSplitter { v -> handleRecvValue(r, v) }
-        s.recv = r
-    }
-    fun syncRecvFeed(data: ByteArray, off: Int, len: Int) { sync?.recv?.splitter?.feed(data, off, len) }
-    fun syncRecvFinish() {
-        val s = sync ?: return
-        val r = s.recv ?: return
-        r.splitter.finish()
+        Jk.forEachValue(ins) { v -> handleRecvValue(r, v) }
         when (r.kind) {
             "people-data" -> if (r.replaceLists) { peopleList.clear(); peopleList.addAll(r.people); savePeople() }
                              else { var ch = false; for (p in r.people) if (!peopleList.contains(p)) { peopleList.add(p); ch = true }; if (ch) savePeople() }
             "catalog-data" -> if (r.replaceLists) { catalogList.clear(); catalogList.addAll(r.catalog); saveCatalog() }
                               else for (e in r.catalog) upsertCatalog(e)
         }
-        s.recv = null
     }
 
-    private fun handleRecvValue(r: RecvState, el: JsonElement) {
+    private fun handleRecvValue(r: RecvState, el: JsonNode) {
         val s = sync ?: return
         when (r.kind) {
-            "device-data" -> (el as? JsonArray)?.let { a ->
-                if (a.size >= 2 && a[1] is JsonPrimitive && (a[1] as JsonPrimitive).isString) {
-                    val peerNo = a[0].jsonPrimitive.intOrNull ?: return
-                    val pub = a[1].jsonPrimitive.content
-                    val name = if (a.size > 2 && a[2] is JsonPrimitive && (a[2] as JsonPrimitive).isString) a[2].jsonPrimitive.content else "peer"
-                    val localNo = reserveDeviceNo(pub, peerNo, name)
-                    s.dnMap[peerNo] = localNo
-                }
+            "device-data" -> if (el.isArray && el.size() >= 2 && el.get(0).isNumber && el.get(1).isTextual) {
+                val peerNo = el.get(0).asInt()
+                val pub = el.get(1).asText()
+                val name = if (el.size() > 2 && el.get(2).isTextual) el.get(2).asText() else "peer"
+                val localNo = reserveDeviceNo(pub, peerNo, name)
+                s.dnMap[peerNo] = localNo
             }
-            "people-data" -> (el as? JsonPrimitive)?.let { if (it.isString) r.people.add(it.content) }
-            "catalog-data" -> (el as? JsonArray)?.let { a -> if (a.isNotEmpty()) r.catalog.add(CatalogEntry(a[0].jsonPrimitive.content, a.drop(1).map { it.jsonPrimitive.content })) }
+            "people-data" -> if (el.isTextual) r.people.add(el.asText())
+            "catalog-data" -> if (el.isArray && el.size() > 0) r.catalog.add(CatalogEntry(el.get(0).asText(), (1 until el.size()).map { el.get(it).asText() }))
             "event-tail" -> handleEventTailValue(r, el)
         }
     }
 
-    private fun handleEventTailValue(r: RecvState, el: JsonElement) {
+    private fun handleEventTailValue(r: RecvState, el: JsonNode) {
         val s = sync ?: return
         val month = r.month
-        when (el) {
-            is JsonObject -> {
-                if (el.containsKey("header")) {
-                    val sch = schemaFromHeader(el); r.cur = sch; r.headerReceived = true
-                    if (monthSchema[month] != sch) appendToMonth(month, headerLineFor(sch), true, sch)
-                    return
-                }
-                val del = el["delete"] as? JsonArray
-                if (del != null) {
-                    if (!r.headerReceived) { r.cur = canonicalSchema(); if (monthSchema[month] != r.cur) appendToMonth(month, canonicalHeaderLine(), true, r.cur) }
-                    val tgt = parseRef(del, r.cur.reference)
-                    val tdn = s.dnMap[tgt.dn] ?: return
-                    val upd = (el["update"] as? JsonPrimitive)?.booleanOrNull == true
-                    val dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (if (upd) "1" else "0")
-                    ensureDeleteKeysLoaded()
-                    if (s.deleteKeys.contains(dkey)) return
-                    s.deleteKeys.add(dkey)
-                    val rIdx = refIndexOfDn(r.cur.reference)
-                    val outObj = buildJsonObject {
-                        put("delete", if (rIdx >= 0) del.withReplaced(rIdx, JsonPrimitive(tdn)) else del)
-                        val th = el["this"] as? JsonArray
-                        if (th != null) {
-                            val a = parseRef(th, r.cur.reference)
-                            val adn = s.dnMap[a.dn] ?: a.dn
-                            put("this", if (rIdx >= 0) th.withReplaced(rIdx, JsonPrimitive(adn)) else th)
-                        }
-                        if (upd) put("update", true)
-                    }
-                    appendToMonth(month, outObj.toString(), false, null)
-                    applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn))
-                    s.received++
-                }
+        if (el.isObject) {
+            if (el.has("header")) {
+                val sch = schemaFromHeader(el); r.cur = sch; r.headerReceived = true
+                if (monthSchema[month] != sch) appendToMonth(month, headerLineFor(sch), true, sch)
+                return
             }
-            is JsonArray -> {
+            val del = el.get("delete")
+            if (del != null && del.isArray) {
                 if (!r.headerReceived) { r.cur = canonicalSchema(); if (monthSchema[month] != r.cur) appendToMonth(month, canonicalHeaderLine(), true, r.cur) }
-                val dnIdx = r.cur.columns.indexOf("dev_no")
-                if (dnIdx < 0) return
-                val e0 = parseEventArray(el, r.cur)
-                val md = s.dnMap[e0.devNo] ?: return
-                if (md == deviceNo) return
-                val e = e0.copy(devNo = md)
-                if (knownEvent(e.key())) return
-                val outA = if (dnIdx < el.size) el.withReplaced(dnIdx, JsonPrimitive(md)) else el
-                appendToMonth(month, outA.toString(), false, null)
-                applyEventToState(e)
+                val tgt = parseRef(del, r.cur.reference)
+                val tdn = s.dnMap[tgt.dn] ?: return
+                val u = el.get("update"); val upd = u != null && u.isBoolean && u.asBoolean()
+                val dkey = keyStr(tgt.edit, tgt.rn, tdn) + "|" + (if (upd) "1" else "0")
+                ensureDeleteKeysLoaded()
+                if (s.deleteKeys.contains(dkey)) return
+                s.deleteKeys.add(dkey)
+                val rIdx = refIndexOfDn(r.cur.reference)
+                val outObj = Jk.obj()
+                outObj.set<JsonNode>("delete", if (rIdx >= 0) del.withReplaced(rIdx, IntNode.valueOf(tdn)) else del)
+                val th = el.get("this")
+                if (th != null && th.isArray) {
+                    val a = parseRef(th, r.cur.reference)
+                    val adn = s.dnMap[a.dn] ?: a.dn
+                    outObj.set<JsonNode>("this", if (rIdx >= 0) th.withReplaced(rIdx, IntNode.valueOf(adn)) else th)
+                }
+                if (upd) outObj.put("update", true)
+                appendToMonth(month, outObj.toString(), false, null)
+                applyDeleteToState(keyStr(tgt.edit, tgt.rn, tdn))
                 s.received++
             }
-            else -> {}
+        } else if (el.isArray) {
+            if (!r.headerReceived) { r.cur = canonicalSchema(); if (monthSchema[month] != r.cur) appendToMonth(month, canonicalHeaderLine(), true, r.cur) }
+            val dnIdx = r.cur.columns.indexOf("dev_no")
+            if (dnIdx < 0) return
+            val e0 = parseEventArray(el, r.cur)
+            val md = s.dnMap[e0.devNo] ?: return
+            if (md == deviceNo) return
+            val e = e0.copy(devNo = md)
+            if (knownEvent(e.key())) return
+            val outA = if (dnIdx < el.size()) el.withReplaced(dnIdx, IntNode.valueOf(md)) else el
+            appendToMonth(month, outA.toString(), false, null)
+            applyEventToState(e)
+            s.received++
         }
     }
 
@@ -748,7 +714,7 @@ class Store(val root: File) {
         val groups = LinkedHashMap<String, MutableList<Event>>()
         for (e in live.values) {
             val sig = listOf(e.eventDatetime, e.subject, costStr(e.cost),
-                e.people ?: "", e.volume ?: "", e.comment ?: "").joinToString("")
+                e.people ?: "", e.volume ?: "", e.comment ?: "").joinToString("")
             groups.getOrPut(sig) { ArrayList() }.add(e)
         }
         var n = 0
