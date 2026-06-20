@@ -1,0 +1,3 @@
+- Full handoff/instructions live in the repo: `/workspace/home-accounting/CLAUDE.md` (architecture, build/test commands, invariants, gotchas, next steps) — read it first when continuing this project.
+- [Build workflow](build-workflow.md) — edit locally in /workspace, build/test on remote appbuild via tar+ssh; targets home-accounting/guitest/syncv2test
+- [Sync streaming arch](sync-streaming-arch.md) — async/cancellable streaming sync, peer-state index, and the EOF busy-loop hang gotcha

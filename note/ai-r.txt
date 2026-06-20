@@ -691,3 +691,28 @@ Done — and now genuinely verified. The remote uses Jackson (4 imports, 0 kotli
 ## I also caught and fixed two things you flagged
 1. **The hung tests** — you were right. Root cause: a fresh peer emitted a 0-byte list item; Android `sendItems` opened the missing file → threw → client closed before flushing → server's `readLine` returned `""` at EOF and `if (line.isEmpty()) continue` busy-looped at ~98% CPU (found via `jstack`). Fixed: guard empty/missing files, and `readLine` throws on EOF. Stale background waits and hung remote processes were killed.
 2. **A push-path bug I introduced** — my first Jackson pushes used `cd .../home-accounting` instead of `.../home-accounting/android`, so they landed in a stray `app/` dir and the real `android/app` kept the old kotlinx code. That means my *first* round of "Jackson" green results was actually the old code passing. I detected it via md5 mismatch, fixed the paths, removed the stray dir + old splitter, and re-ran **everything** above against the genuine Jackson build. Recorded the gotcha in memory so it won't recur.
+
+
+
+
+==== CLAUDE folder=home-accounting session=5778f742-bb34-4c48-81d2-da3f41687685 sessionId=5778f742-bb34-4c48-81d2-da3f41687685 | отправлено 2026-06-20 05:49:53 | завершено 2026-06-20 05:52:50 ====
+Готово. Создал памятку для новой сессии.
+
+## Что сделано
+**`/workspace/home-accounting/CLAUDE.md`** — подробная инструкция для Claude (на русском, команды — verbatim). Лежит в корне проекта, поэтому новая сессия, работающая в этой папке, подхватит её автоматически (как обычный `CLAUDE.md`), и она дополняет родительский `/workspace/CLAUDE.md` с твоими правилами.
+
+Разделы:
+1. **Что это** — два приложения с общим форматом и протоколом.
+2. **Где собирать / как доставлять код** — хосты `appbuild`/`androidbuild2`, доставка `tar`-ом через ssh, точные пути (с предупреждением про `cd …/android` и сверку md5).
+3. **Сборка и тесты** — команды для desktop (CMake-цели) и Android (gradle), под `timeout`, `--rerun-tasks`, `LC_ALL`.
+4. **Формат данных на диске** — JSONL, месяцы/декады, header+reference, delete/this/update, comment, идентичность записи.
+5. **Синхронизация** — потоковость, async/cancel, peer-state индекс, манифесты, DN-map, дедуп.
+6. **Инварианты (не ломать)** — кросс-платформенная совместимость, правила сериализации.
+7. **Подводные камни** — все, на которые наступали: kotlinx→Jackson, busy-loop-зависание + диагностика `jstack`, per-Store Crypto, JVM-локаль имён, GCC-корутины + initializer-list, путь tar.
+8. **Текущий статус** — что зелёное (с цифрами тестов и размерами сборок).
+9. **Возможные следующие шаги** — подписать APK, живой сетевой кросс-тест.
+10. **Правила работы** — ничего не ставить, менять только рабочую папку, после правок формата гонять unit+кросс-тесты в обе стороны и сверять, что собирается свежий код.
+
+Также добавил в авто-загружаемую память (`MEMORY.md`) строку-указатель на этот файл, плюс уже есть заметки `build-workflow.md` и `sync-streaming-arch.md` с ключевыми фактами и гочами.
+
+Так новая сессия сможет за пару минут въехать в проект и продолжать без повторения уже пройденных ошибок.
