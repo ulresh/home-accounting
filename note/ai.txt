@@ -463,6 +463,17 @@ ai-r.txt
 
 
 
+!2026-06-20 06:04:34
+
+CLAUDE DEFAULT folder=home-accounting session=develop2
+CLAUDE SINGLE DEFAULT folder=home-accounting session=develop2
+
+git diff bb1807f632e2c16b8a0577820a64f3ab14427bc3 --stat -- desktop/
+git diff bb1807f632e2c16b8a0577820a64f3ab14427bc3 -- desktop/
+
+
+
+
 
 TODO
 * Синхронизацию проверять заново всю.
