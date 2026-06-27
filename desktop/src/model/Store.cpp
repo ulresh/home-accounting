@@ -346,6 +346,17 @@ void read_last_edit(Store &s, const T &d) {
     }
 }
 
+bool compareEvents(const std::unique_ptr<Event> &a,
+		   const std::unique_ptr<Event> &b) {
+    return a->event_datetime < b->event_datetime ||
+	(a->event_datetime == b->event_datetime &&
+	 (a->edit_datetime < b->edit_datetime ||
+	  (a->edit_datetime == b->edit_datetime &&
+	   (a->rec_no < b->rec_no ||
+	    (a->rec_no == b->rec_no &&
+	     a->dev_no < b->dev_no)))));
+}
+
 // ---- загрузка событий: по месяцам, удаления применяются на лету ----
 void Store::loadEvents() {
     events_.clear(); otherSchemaMonths_.clear();
@@ -374,16 +385,7 @@ void Store::loadEvents() {
         });
 	if(cur != can) otherSchemaMonths_.insert(yyyymm);
 	std::sort(events_.begin() + start, events_.end(),
-		  [](const std::unique_ptr<Event> &a,
-		     const std::unique_ptr<Event> &b){
-		      return a->event_datetime < b->event_datetime ||
-			  (a->event_datetime == b->event_datetime &&
-			   (a->edit_datetime < b->edit_datetime ||
-			    (a->edit_datetime == b->edit_datetime &&
-			     (a->rec_no < b->rec_no ||
-			      (a->rec_no == b->rec_no &&
-			       a->dev_no < b->dev_no)))));
-		  });
+		  compareEvents);
     }
 }
 
@@ -467,27 +469,31 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     return true;
 }
 
-    // TODO +++ revision mark
-Event Store::addEvent(const std::string& event_datetime, const std::string& subject,
-                      double cost, std::optional<std::string> people,
-                      std::optional<std::string> volume, std::optional<std::string> comment) {
-    Event e;
-    e.event_datetime = event_datetime;
-    e.subject = subject;
-    e.cost = cost;
-    e.edit_datetime = nowStamp();
-    e.dev_no = deviceNo_;
-    e.rec_no = allocRecNo(e.edit_datetime);
-    e.people = std::move(people);
-    e.volume = std::move(volume);
-    e.comment = std::move(comment);
-    int ym = yyyymmOf(e.event_datetime);
+Event &Store::addEvent(const std::string& event_datetime,
+		      const std::string& subject,
+                      double cost, const std::string &people,
+                      const std::string &volume,
+		      const std::string &comment) {
+    Event *ep;
+    std::unique_ptr<Event> eh(ep = new Event);
+    ep->event_datetime = event_datetime;
+    int ym = yyyymmOf(ep->event_datetime);
+    ep->subject = subject;
+    ep->cost = cost;
+    ep->edit_datetime = nowStamp();
+    ep->dev_no = deviceNo_;
+    ep->rec_no = allocRecNo(ep->edit_datetime, ym);
+    ep->people = people;
+    ep->volume = volume;
+    ep->comment = comment;
     ensureCanonicalHeader(ym);
-    appendToMonth(ym, eventToLine(e));
-    applyEventToState(e);
-    return e;
+    appendToMonth(ym, eventToLine(*ep));
+    events_.emplace(std::lower_bound(events_.begin(), events_.end(), eh,
+				     compareEvents), eh.release());
+    return *ep;
 }
 
+    // TODO +++ revision mark
 void Store::deleteEvent(const Event& e) {
     writeDelete(e.edit_datetime, e.rec_no, e.dev_no, false);
     applyDeleteToState(e.key());
@@ -495,11 +501,11 @@ void Store::deleteEvent(const Event& e) {
 
 Event Store::editEvent(const Event& oldEv, const std::string& event_datetime,
                        const std::string& subject, double cost,
-                       std::optional<std::string> people, std::optional<std::string> volume,
-                       std::optional<std::string> comment) {
+                       const std::string &people, const std::string &volume,
+                       const std::string &comment) {
     writeDelete(oldEv.edit_datetime, oldEv.rec_no, oldEv.dev_no, true);
     applyDeleteToState(oldEv.key());
-    return addEvent(event_datetime, subject, cost, std::move(people), std::move(volume), std::move(comment));
+    return addEvent(event_datetime, subject, cost, people, volume, comment);
 }
 
 void Store::addPerson(const std::string& name) {

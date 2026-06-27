@@ -79,15 +79,16 @@ public:
     std::string categoryOf(const std::string& subject) const;
 
     // --- мутации ---
-    Event addEvent(const std::string& event_datetime, const std::string& subject,
-                   double cost, std::optional<std::string> people,
-                   std::optional<std::string> volume,
-                   std::optional<std::string> comment = std::nullopt);
+    Event &addEvent(const std::string& event_datetime,
+		    const std::string& subject,
+		    double cost, const std::string &people,
+		    const std::string &volume,
+		    const std::string &comment = {});
     void  deleteEvent(const Event& e);
     Event editEvent(const Event& oldEv, const std::string& event_datetime,
                     const std::string& subject, double cost,
-                    std::optional<std::string> people, std::optional<std::string> volume,
-                    std::optional<std::string> comment = std::nullopt);
+                    const std::string &people, const std::string &volume,
+                    const std::string &comment = {});
 
     void addPerson(const std::string& name);
     void removePerson(const std::string& name);
