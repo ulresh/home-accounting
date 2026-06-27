@@ -12,6 +12,62 @@
 
 namespace ha {
 
+inline bool compareEvents(const std::shared_ptr<Event> &a,
+		   const std::shared_ptr<Event> &b) {
+    return a->event_datetime < b->event_datetime ||
+	(a->event_datetime == b->event_datetime &&
+	 (a->edit_datetime < b->edit_datetime ||
+	  (a->edit_datetime == b->edit_datetime &&
+	   (a->rec_no < b->rec_no ||
+	    (a->rec_no == b->rec_no &&
+	     a->dev_no < b->dev_no)))));
+}
+inline bool compareEventChar(const std::shared_ptr<Event> &a,
+			     const char *b) {
+    auto s = a->event_datetime.size();
+    if(s < 7) {
+	if(!s) return true;
+	else return memcmp(a->event_datetime.data(), b, s) <= 0;
+    }
+    else return memcmp(a->event_datetime.data(), b, 7) < 0;
+}
+inline bool compareCharEvent(const char *a,
+			     const std::shared_ptr<Event> &b) {
+    auto s = b->event_datetime.size();
+    if(s < 7) {
+	if(!s) return false;
+	else return memcmp(a, b->event_datetime.data(), s) < 0;
+    }
+    else return memcmp(a, b->event_datetime.data(), 7) < 0;
+}
+
+struct CompareEventsSet {
+    using is_transparent = void;
+    bool operator()(const std::shared_ptr<Event> &a,
+		    const std::shared_ptr<Event> &b) const {
+	return compareEvents(a, b);
+    }
+    bool operator()(const std::shared_ptr<Event> &a,
+		    const char *b) const {
+	return compareEventChar(a, b);
+    }
+    bool operator()(const char *a,
+		    const std::shared_ptr<Event> &b) const {
+	return compareCharEvent(a, b);
+    }
+};
+
+struct CompareYyyyMm {
+    bool operator()(const std::shared_ptr<Event> &a,
+		    const char *b) const {
+	return compareEventChar(a, b);
+    }
+    bool operator()(const char *a,
+		    const std::shared_ptr<Event> &b) const {
+	return compareCharEvent(a, b);
+    }
+};
+
 // Состояние файла для инкрементной синхронизации: размер и контрольная сумма.
 struct FileState {
     long long   size = 0;
@@ -69,9 +125,10 @@ public:
     int  fontSize() const { return fontSize_; }
     void setFontSize(int pt);
 
+    typedef std::set<std::shared_ptr<Event>, CompareEventsSet> Events;
+    typedef std::vector<std::shared_ptr<Event> > TempEvents;
     // --- доступ к данным (текущее видимое состояние) ---
-    const std::vector<std::unique_ptr<Event> > &events() const {
-	return events_; }
+    const Events &events() const { return events_; }
     const std::vector<std::string>&  people()  const { return people_; }
     const std::vector<CatalogEntry>& catalog() const { return catalog_; }
     const std::vector<Device>&       devices() const { return devices_; }
@@ -163,6 +220,7 @@ private:
     void saveCatalog();
     void saveDevices();
 
+    template<typename T> void read_last_edit(const T &d);
     // Низкоуровневая дозапись строки в месячный файл (+ учёт схемы/наличия).
     void appendToMonth(int yyyymm, const std::string& line);
     // Перед записью НАШЕЙ строки убедиться, что действует наша каноническая схема.
@@ -171,7 +229,7 @@ private:
     bool writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
-    void applyDeleteFromLoad(long start, const RecRef &r);
+    void applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r);
 
     std::filesystem::path root_;
     std::string db_ = "Основная";
@@ -182,9 +240,9 @@ private:
     std::vector<std::string>  people_;
     std::vector<CatalogEntry> catalog_;
     std::vector<Device>       devices_;
-    std::vector<std::unique_ptr<Event> > events_;
+    Events events_;
 
-    std::set<int> otherSchemaMonths_;
+    std::set<int> canonicalSchemaMonths_;
     std::string lastEdit_;
     int lastEditSeq_ = 0;
 

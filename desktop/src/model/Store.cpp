@@ -334,68 +334,59 @@ void Store::saveCatalog() {
 }
 
 template<typename T>
-void read_last_edit(Store &s, const T &d) {
-    if(d.dev_no == s.deviceNo_) {
-	if(d.edit_datetime > s.lastEdit_) {
-	    s.lastEdit_ = d.edit_datetime;
-	    s.lastEditSeq_ = d.rec_no;
+void Store::read_last_edit(const T &d) {
+    if(d.dev_no == deviceNo_) {
+	if(d.edit_datetime > lastEdit_) {
+	    lastEdit_ = d.edit_datetime;
+	    lastEditSeq_ = d.rec_no;
 	}
-	else if(d.edit_datetime == s.lastEdit_ &&
-		d.rec_no > s.lastEditSeq_)
-	    s.lastEditSeq_ = d.rec_no;
+	else if(d.edit_datetime == lastEdit_ &&
+		d.rec_no > lastEditSeq_)
+	    lastEditSeq_ = d.rec_no;
     }
-}
-
-bool compareEvents(const std::unique_ptr<Event> &a,
-		   const std::unique_ptr<Event> &b) {
-    return a->event_datetime < b->event_datetime ||
-	(a->event_datetime == b->event_datetime &&
-	 (a->edit_datetime < b->edit_datetime ||
-	  (a->edit_datetime == b->edit_datetime &&
-	   (a->rec_no < b->rec_no ||
-	    (a->rec_no == b->rec_no &&
-	     a->dev_no < b->dev_no)))));
 }
 
 // ---- загрузка событий: по месяцам, удаления применяются на лету ----
 void Store::loadEvents() {
-    events_.clear(); otherSchemaMonths_.clear();
+    events_.clear(); canonicalSchemaMonths_.clear();
     lastEdit_.clear(); lastEditSeq_ = 0;
     Schema can = canonicalSchema();
     for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
         Schema cur = can;
-	auto start = events_.size();
+	TempEvents monthEvents;
         readValues(path, [&](const json::value& v){
             if (v.is_object()) {
                 auto& o = v.as_object();
                 if (o.if_contains("header")) cur = schemaFromHeader(o);
                 else if (auto* del = o.if_contains("delete")) {
                     RecRef t = parseRef(del->as_array(), cur.reference);
-		    applyDeleteFromLoad(start, t);
+		    applyDeleteFromLoad(monthEvents, t);
 		    if(auto *edit = o.if_contains("this"))
-			read_last_edit(*this, parseRef(edit->as_array(),
-						       cur.reference));
+			read_last_edit(parseRef(edit->as_array(),
+						cur.reference));
                 }
             }
             else if (v.is_array()) {
 		Event *ep;
-		events_.emplace_back(ep=parseEventArray(v.as_array(), cur));
-		read_last_edit(*this, *ep);
+		monthEvents.emplace_back(ep = parseEventArray(
+				v.as_array(), cur));
+		read_last_edit(*ep);
 	    }
         });
-	if(cur != can) otherSchemaMonths_.insert(yyyymm);
-	std::sort(events_.begin() + start, events_.end(),
+	if(cur == can) canonicalSchemaMonths_.insert(yyyymm);
+	std::sort(monthEvents.begin(), monthEvents.end(),
 		  compareEvents);
+	for(auto &&p : monthEvents) events_.insert(events_.end(), p);
     }
 }
 
-void Store::applyDeleteFromLoad(long start, const RecRef &r) {
-    auto last = events_.size() - 1;
-    for(auto pos = last; pos >= start; --pos)
-	if(events_[pos]->compare_delete(r)) {
+void Store::applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r) {
+    for(auto &&p : monthEvents)
+	if(p->compare_delete(r)) {
 	    // будет сортировка, поэтому порядок не важен
-	    if(pos != last) events_[pos].reset(events_[last].release());
-	    events_.resize(last);
+	    auto &b = monthEvents.back();
+	    if(p.get() != b.get()) p = b;
+	    monthEvents.resize(monthEvents.size() - 1);
 	    break;
 	}
 }
@@ -406,17 +397,6 @@ std::string Store::categoryOf(const std::string& subject) const {
             if (it == subject) return e.category;
     return {};
 }
-
-struct CompareYyyyMm {
-    bool operator()(const std::unique_ptr<Event> &a,
-		    const char *b) const {
-	return a->event_datetime < b;
-    }
-    bool operator()(const char *a,
-		    const std::unique_ptr<Event> &b) const {
-	return a < b->event_datetime.substr(0, 7);
-    }
-};
 
 int Store::allocRecNo(const std::string &stamp, int yyyymm) {
     if(stamp > lastEdit_) {
@@ -430,10 +410,11 @@ int Store::allocRecNo(const std::string &stamp, int yyyymm) {
 	char yyyy_mm_s[8];
 	std::snprintf(yyyy_mm_s, sizeof(yyyy_mm_s), "%04d-%02d",
 		      yyyymm / 100, yyyymm % 100);
-	auto r = std::equal_range(events_.begin(), events_.end(),
-				  std::to_string(yyyymm), CompareYyyyMm());
-	for(auto p = r.first; p < r.second; ++p) {
+	for(auto p = events_.lower_bound(yyyy_mm_s),
+		e = events_.end(); p != e; ++p) {
 	    auto v = **p;
+	    if(v.event_datetime.size() < 7 ||
+	       memcmp(yyyy_mm_s, v.event_datetime.data(), 7)) break;
 	    if(v.dev_no == deviceNo_ && v.edit_datetime == stamp &&
 	       v.rec_no >= seq)
 		seq = v.rec_no + 1;
@@ -446,9 +427,9 @@ void Store::appendToMonth(int yyyymm, const std::string& line) {
     appendLine(monthPath(yyyymm), line);
 }
 void Store::ensureCanonicalHeader(int yyyymm) {
-    if(otherSchemaMonths_.count(yyyymm)) {
+    if(!canonicalSchemaMonths_.contains(yyyymm)) {
         appendToMonth(yyyymm, canonicalHeaderLine());
-	otherSchemaMonths_.erase(yyyymm);
+	canonicalSchemaMonths_.insert(yyyymm);
     }
 }
 
@@ -475,7 +456,7 @@ Event &Store::addEvent(const std::string& event_datetime,
                       const std::string &volume,
 		      const std::string &comment) {
     Event *ep;
-    std::unique_ptr<Event> eh(ep = new Event);
+    std::shared_ptr<Event> eh(ep = new Event);
     ep->event_datetime = event_datetime;
     int ym = yyyymmOf(ep->event_datetime);
     ep->subject = subject;
@@ -488,12 +469,12 @@ Event &Store::addEvent(const std::string& event_datetime,
     ep->comment = comment;
     ensureCanonicalHeader(ym);
     appendToMonth(ym, eventToLine(*ep));
-    events_.emplace(std::lower_bound(events_.begin(), events_.end(), eh,
-				     compareEvents), eh.release());
+    events_.insert(eh);
     return *ep;
 }
 
     // TODO +++ revision mark
+#if 0
 void Store::deleteEvent(const Event& e) {
     writeDelete(e.edit_datetime, e.rec_no, e.dev_no, false);
     applyDeleteToState(e.key());
@@ -931,5 +912,6 @@ void Store::syncCommit(int peerDn) {
         off[yyyymm] = (long long)fs::file_size(path);
     saveSyncIndex(peerDn, off);
 }
+#endif
 
 } // namespace ha
