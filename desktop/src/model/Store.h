@@ -141,8 +141,9 @@ public:
 		    double cost, const std::string &people,
 		    const std::string &volume,
 		    const std::string &comment = {});
-    void  deleteEvent(const Event& e);
-    Event editEvent(const Event& oldEv, const std::string& event_datetime,
+    void  deleteEvent(const std::shared_ptr<Event> &e);
+    Event editEvent(const std::shared_ptr<Event> &oldEv,
+		    const std::string& event_datetime,
                     const std::string& subject, double cost,
                     const std::string &people, const std::string &volume,
                     const std::string &comment = {});

@@ -473,19 +473,18 @@ Event &Store::addEvent(const std::string& event_datetime,
     return *ep;
 }
 
-    // TODO +++ revision mark
-#if 0
-void Store::deleteEvent(const Event& e) {
-    writeDelete(e.edit_datetime, e.rec_no, e.dev_no, false);
-    applyDeleteToState(e.key());
+void Store::deleteEvent(const std::shared_ptr<Event> &e) {
+    writeDelete(e->edit_datetime, e->rec_no, e->dev_no, false);
+    events_.erase(e);
 }
 
-Event Store::editEvent(const Event& oldEv, const std::string& event_datetime,
+Event Store::editEvent(const std::shared_ptr<Event> &oldEv,
+		       const std::string& event_datetime,
                        const std::string& subject, double cost,
                        const std::string &people, const std::string &volume,
                        const std::string &comment) {
-    writeDelete(oldEv.edit_datetime, oldEv.rec_no, oldEv.dev_no, true);
-    applyDeleteToState(oldEv.key());
+    writeDelete(oldEv->edit_datetime, oldEv->rec_no, oldEv->dev_no, true);
+    events_.erase(oldEv);
     return addEvent(event_datetime, subject, cost, people, volume, comment);
 }
 
@@ -503,10 +502,14 @@ void Store::removePerson(const std::string& name) {
 void Store::upsertCatalog(const CatalogEntry& e) {
     for (auto& c : catalog_) {
         if (c.category == e.category) {
+	    bool changed = false;
             for (auto& it : e.items)
-                if (std::find(c.items.begin(), c.items.end(), it) == c.items.end())
+                if (std::find(c.items.begin(), c.items.end(), it) ==
+		    c.items.end()) {
                     c.items.push_back(it);
-            saveCatalog();
+		    changed = true;
+		}
+            if(changed) saveCatalog();
             return;
         }
     }
@@ -541,6 +544,8 @@ static bool icontains(const std::string& hay, const std::string& needle) {
     return utf8Lower(hay).find(utf8Lower(needle)) != std::string::npos;
 }
 
+// TODO +++ revision mark
+#if 0
 std::vector<Event> Store::filter(const std::string& q) const {
     auto all = events();
     if (q.empty()) return all;
