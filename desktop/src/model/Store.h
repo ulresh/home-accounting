@@ -70,7 +70,8 @@ public:
     void setFontSize(int pt);
 
     // --- доступ к данным (текущее видимое состояние) ---
-    std::vector<Event>        events() const;            // без удалённых
+    const std::vector<std::unique_ptr<Event> > &events() const {
+	return events_; }
     const std::vector<std::string>&  people()  const { return people_; }
     const std::vector<CatalogEntry>& catalog() const { return catalog_; }
     const std::vector<Device>&       devices() const { return devices_; }
@@ -97,7 +98,7 @@ public:
     std::vector<Event> filter(const std::string& q) const;
 
     // --- идентичность устройства ---
-    void ensureIdentity();
+    void ensureIdentity(bool forceSaveConfig = false);
     std::string myPubkey() const { return myPubkey_; }
     std::filesystem::path certPath() const;
     std::filesystem::path keyPath() const;
@@ -168,13 +169,8 @@ private:
     // Записать строку удаления (target + this + флаг update). Уважает дедуп.
     bool writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update);
 
-    int  allocRecNo(const std::string& stamp);
-    int  scanMaxOwnRn(const std::string& stamp) const;
-    bool knownEvent(const std::string& key) const;
-
-    // Применить событие/удаление к видимому состоянию (live_/deletedTargets_).
-    void applyEventToState(const Event& e);
-    void applyDeleteToState(const std::string& targetKey);
+    int  allocRecNo(const std::string &stamp, int yyyymm);
+    void applyDeleteFromLoad(long start, const RecRef &r);
 
     std::filesystem::path root_;
     std::string db_ = "Основная";
@@ -185,12 +181,11 @@ private:
     std::vector<std::string>  people_;
     std::vector<CatalogEntry> catalog_;
     std::vector<Device>       devices_;
+    std::vector<std::unique_ptr<Event> > events_;
 
-    std::map<std::string, Event> live_;          // видимые события: key -> Event
-    std::set<std::string> deletedTargets_;       // ключи удалённых событий
-    std::map<int, Schema> monthSchema_;          // действующая схема по месяцу
-    std::map<std::string, int> seqAtStamp_;      // счётчик RN на штамп (наши записи)
-    bool anyEventLines_ = false;                 // были ли вообще строки событий
+    std::set<int> otherSchemaMonths_;
+    std::string lastEdit_;
+    int lastEditSeq_ = 0;
 
     // Потоковый приём одного блока: инкрементный разбор по мере поступления байт.
     struct RecvState {

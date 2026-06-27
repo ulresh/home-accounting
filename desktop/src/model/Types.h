@@ -6,6 +6,8 @@
 
 namespace ha {
 
+struct RecRef { std::string edit_datetime; int rec_no = 0; int dev_no = 0; };
+
 // Одно событие (трата/покупка). Идентичность записи в системе:
 // (edit_datetime, rec_no, dev_no). Эти три поля неизменны.
 struct Event {
@@ -15,13 +17,12 @@ struct Event {
     std::string edit_datetime;         // "YYYY-MM-DD HH:MM:SS" — момент записи
     int         rec_no = 0;            // RN — добавочный номер в пределах секунды/устройства
     int         dev_no = 0;            // DN — номер устройства-автора
-    std::optional<std::string> people;  // имя человека или пусто
-    std::optional<std::string> volume;  // объём/количество, напр. "2 кг"
-    std::optional<std::string> comment; // произвольный комментарий
-
-    // Глобальный ключ записи.
-    std::string key() const {
-        return edit_datetime + "|" + std::to_string(rec_no) + "|" + std::to_string(dev_no);
+    std::string people;  // имя человека или пусто
+    std::string volume;  // объём/количество, напр. "2 кг"
+    std::string comment; // произвольный комментарий
+    bool compare_delete(const RecRef &r) const {
+	return edit_datetime == r.edit_datetime && rec_no == r.rec_no &&
+	    dev_no == r.dev_no;
     }
 };
 

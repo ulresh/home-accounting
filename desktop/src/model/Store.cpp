@@ -120,52 +120,37 @@ static Schema schemaFromHeader(const json::object& o) {
     return s;
 }
 
-static Event parseEventArray(const json::array& a, const Schema& s) {
-    Event e;
+static Event *parseEventArray(const json::array& a, const Schema& s) {
+    Event* ep;
+    std::unique_ptr<Event> eh(ep = new Event);
     for (size_t i = 0; i < s.columns.size() && i < a.size(); ++i) {
         const std::string& c = s.columns[i];
         const json::value& v = a[i];
-        if      (c == "event_datetime") e.event_datetime = asStr(v);
-        else if (c == "subject")        e.subject = asStr(v);
-        else if (c == "cost")           e.cost = asNum(v);
-        else if (c == "edit_datetime")  e.edit_datetime = asStr(v);
-        else if (c == "rec_no")         e.rec_no = asInt(v);
-        else if (c == "dev_no")         e.dev_no = asInt(v);
-        else if (c == "people")  { if (v.is_string()) e.people  = asStr(v); }
-        else if (c == "volume")  { if (v.is_string()) e.volume  = asStr(v); }
-        else if (c == "comment") { if (v.is_string()) e.comment = asStr(v); }
+        if      (c == "event_datetime") ep->event_datetime = asStr(v);
+        else if (c == "subject")        ep->subject = asStr(v);
+        else if (c == "cost")           ep->cost = asNum(v);
+        else if (c == "edit_datetime")  ep->edit_datetime = asStr(v);
+        else if (c == "rec_no")         ep->rec_no = asInt(v);
+        else if (c == "dev_no")         ep->dev_no = asInt(v);
+        else if (c == "people")  ep->people  = asStr(v);
+        else if (c == "volume")  ep->volume  = asStr(v);
+        else if (c == "comment") ep->comment = asStr(v);
     }
-    return e;
+    return eh.release();
 }
 
-struct RecRef { std::string edit; int rn = 0; int dn = 0; };
 static RecRef parseRef(const json::array& a, const std::vector<std::string>& ref) {
     RecRef r;
     for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
-        if      (ref[i] == "edit_datetime") r.edit = asStr(a[i]);
-        else if (ref[i] == "rec_no")        r.rn = asInt(a[i]);
-        else if (ref[i] == "dev_no")        r.dn = asInt(a[i]);
+        if      (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
+        else if (ref[i] == "rec_no")        r.rec_no = asInt(a[i]);
+        else if (ref[i] == "dev_no")        r.dev_no = asInt(a[i]);
     }
     return r;
 }
 static int refIndexOfDn(const std::vector<std::string>& ref) {
     for (size_t i = 0; i < ref.size(); ++i) if (ref[i] == "dev_no") return (int)i;
     return -1;
-}
-
-static std::string keyStr(const std::string& edit, int rn, int dn) {
-    return edit + "|" + std::to_string(rn) + "|" + std::to_string(dn);
-}
-// разбор ключа edit|rn|dn (edit не содержит '|').
-static RecRef splitKey(const std::string& k) {
-    RecRef r;
-    auto p2 = k.rfind('|');
-    auto p1 = (p2 == std::string::npos || p2 == 0) ? std::string::npos : k.rfind('|', p2 - 1);
-    if (p1 == std::string::npos || p2 == std::string::npos) return r;
-    r.edit = k.substr(0, p1);
-    r.rn = std::atoi(k.substr(p1 + 1, p2 - p1 - 1).c_str());
-    r.dn = std::atoi(k.substr(p2 + 1).c_str());
-    return r;
 }
 
 // каноническая сериализация НАШЕГО события (с обрезкой хвостовых null).
@@ -176,14 +161,14 @@ static std::string eventToLine(const Event& e) {
        << costToStr(e.cost) << ','
        << json::serialize(jv(e.edit_datetime)) << ','
        << e.rec_no << ',' << e.dev_no;
-    bool hasC = e.comment && !e.comment->empty();
-    bool hasV = e.volume  && !e.volume->empty();
-    bool hasP = e.people  && !e.people->empty();
+    bool hasC = !e.comment.empty();
+    bool hasV = !e.volume.empty();
+    bool hasP = !e.people.empty();
     if (hasP || hasV || hasC) {
-        os << ',' << (hasP ? json::serialize(jv(*e.people)) : std::string("null"));
+        os << ',' << (hasP ? json::serialize(jv(e.people)) : std::string("null"));
         if (hasV || hasC) {
-            os << ',' << (hasV ? json::serialize(jv(*e.volume)) : std::string("null"));
-            if (hasC) os << ',' << json::serialize(jv(*e.comment));
+            os << ',' << (hasV ? json::serialize(jv(e.volume)) : std::string("null"));
+            if (hasC) os << ',' << json::serialize(jv(e.comment));
         }
     }
     os << ']';
@@ -208,13 +193,14 @@ static std::vector<std::pair<int,fs::path>> enumerateMonths(const fs::path& dbDi
     for (auto& decade : fs::directory_iterator(dbDir)) {
         if (!decade.is_directory()) continue;
         std::string dn = decade.path().filename().string();
-        if (dn.empty() || !std::all_of(dn.begin(), dn.end(), ::isdigit)) continue;  // не sync/identity
+        if (dn.empty() || dn.size() != 4 || !std::all_of(dn.begin(), dn.end(), ::isdigit)) continue;  // не sync/identity
+	int yy00 = (dn[0] - '0') * 1000 + (dn[1] - '0') * 100;
         for (auto& f : fs::directory_iterator(decade.path())) {
             if (!f.is_regular_file() || f.path().extension() != ".jsonl") continue;
             std::string stem = f.path().stem().string();   // "2606"
             if (stem.size() != 4 || !std::all_of(stem.begin(), stem.end(), ::isdigit)) continue;
             int yymm = std::atoi(stem.c_str());
-            int yyyymm = (2000 + yymm / 100) * 100 + (yymm % 100);
+            int yyyymm = (yy00 + yymm / 100) * 100 + (yymm % 100);
             out.emplace_back(yyyymm, f.path());
         }
     }
@@ -223,8 +209,6 @@ static std::vector<std::pair<int,fs::path>> enumerateMonths(const fs::path& dbDi
 }
 
 void Store::load() {
-    live_.clear(); deletedTargets_.clear(); monthSchema_.clear();
-    seqAtStamp_.clear(); anyEventLines_ = false;
     loadConfig();
     loadDevices();
     loadPeople();
@@ -282,12 +266,9 @@ void Store::switchDatabase(const std::string& name, bool create) {
     }
     db_ = name;
     deviceNo_ = 0;
-    people_.clear(); catalog_.clear(); devices_.clear();
-    live_.clear(); deletedTargets_.clear(); monthSchema_.clear();
-    seqAtStamp_.clear(); anyEventLines_ = false;
-    saveConfig();
-    loadDevices(); loadPeople(); loadCatalog(); loadEvents();
-    ensureIdentity();
+    loadDevices();
+    ensureIdentity(true);
+    loadPeople(); loadCatalog(); loadEvents();
 }
 
 void Store::loadDevices() {
@@ -352,52 +333,69 @@ void Store::saveCatalog() {
     writeAtomic(dbDir() / "catalog.jsonl", content);
 }
 
-// ---- загрузка событий: по месяцам, удаления применяются на лету ----
-void Store::loadEvents() {
-    for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
-        Schema cur = canonicalSchema();
-        bool sawHeader = false;
-        readValues(path, [&](const json::value& v){
-            if (v.is_object()) {
-                auto& o = v.as_object();
-                if (o.if_contains("header")) { cur = schemaFromHeader(o); monthSchema_[yyyymm] = cur; sawHeader = true; }
-                else if (auto* del = o.if_contains("delete")) {
-                    RecRef t = parseRef(del->as_array(), cur.reference);
-                    applyDeleteToState(keyStr(t.edit, t.rn, t.dn));
-                    anyEventLines_ = true;
-                }
-            }
-            else if (v.is_array()) {
-                Event e = parseEventArray(v.as_array(), cur);
-                anyEventLines_ = true;
-                applyEventToState(e);
-            }
-        });
-        if (!sawHeader && !monthSchema_.count(yyyymm)) monthSchema_[yyyymm] = canonicalSchema();
+template<typename T>
+void read_last_edit(Store &s, const T &d) {
+    if(d.dev_no == s.deviceNo_) {
+	if(d.edit_datetime > s.lastEdit_) {
+	    s.lastEdit_ = d.edit_datetime;
+	    s.lastEditSeq_ = d.rec_no;
+	}
+	else if(d.edit_datetime == s.lastEdit_ &&
+		d.rec_no > s.lastEditSeq_)
+	    s.lastEditSeq_ = d.rec_no;
     }
 }
 
-void Store::applyEventToState(const Event& e) {
-    std::string key = e.key();
-    live_[key] = e;
-}
-void Store::applyDeleteToState(const std::string& targetKey) {
-    live_.erase(targetKey);
-    deletedTargets_.insert(targetKey);
+// ---- загрузка событий: по месяцам, удаления применяются на лету ----
+void Store::loadEvents() {
+    events_.clear(); otherSchemaMonths_.clear();
+    lastEdit_.clear(); lastEditSeq_ = 0;
+    Schema can = canonicalSchema();
+    for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
+        Schema cur = can;
+	auto start = events_.size();
+        readValues(path, [&](const json::value& v){
+            if (v.is_object()) {
+                auto& o = v.as_object();
+                if (o.if_contains("header")) cur = schemaFromHeader(o);
+                else if (auto* del = o.if_contains("delete")) {
+                    RecRef t = parseRef(del->as_array(), cur.reference);
+		    applyDeleteFromLoad(start, t);
+		    if(auto *edit = o.if_contains("this"))
+			read_last_edit(*this, parseRef(edit->as_array(),
+						       cur.reference));
+                }
+            }
+            else if (v.is_array()) {
+		Event *ep;
+		events_.emplace_back(ep=parseEventArray(v.as_array(), cur));
+		read_last_edit(*this, *ep);
+	    }
+        });
+	if(cur != can) otherSchemaMonths_.insert(yyyymm);
+	std::sort(events_.begin() + start, events_.end(),
+		  [](const std::unique_ptr<Event> &a,
+		     const std::unique_ptr<Event> &b){
+		      return a->event_datetime < b->event_datetime ||
+			  (a->event_datetime == b->event_datetime &&
+			   (a->edit_datetime < b->edit_datetime ||
+			    (a->edit_datetime == b->edit_datetime &&
+			     (a->rec_no < b->rec_no ||
+			      (a->rec_no == b->rec_no &&
+			       a->dev_no < b->dev_no)))));
+		  });
+    }
 }
 
-bool Store::knownEvent(const std::string& key) const {
-    return live_.count(key) || deletedTargets_.count(key);
-}
-
-std::vector<Event> Store::events() const {
-    std::vector<Event> out;
-    out.reserve(live_.size());
-    for (auto& [k, e] : live_) out.push_back(e);
-    std::sort(out.begin(), out.end(), [](const Event& a, const Event& b){
-        return a.event_datetime > b.event_datetime;
-    });
-    return out;
+void Store::applyDeleteFromLoad(long start, const RecRef &r) {
+    auto last = events_.size() - 1;
+    for(auto pos = last; pos >= start; --pos)
+	if(events_[pos]->compare_delete(r)) {
+	    // будет сортировка, поэтому порядок не важен
+	    if(pos != last) events_[pos].reset(events_[last].release());
+	    events_.resize(last);
+	    break;
+	}
 }
 
 std::string Store::categoryOf(const std::string& subject) const {
@@ -407,41 +405,56 @@ std::string Store::categoryOf(const std::string& subject) const {
     return {};
 }
 
-int Store::scanMaxOwnRn(const std::string& stamp) const {
-    int m = -1;
-    for (auto& [k, e] : live_)
-        if (e.dev_no == deviceNo_ && e.edit_datetime == stamp) m = std::max(m, e.rec_no);
-    for (auto& key : deletedTargets_) {
-        RecRef r = splitKey(key);
-        if (r.dn == deviceNo_ && r.edit == stamp) m = std::max(m, r.rn);
+struct CompareYyyyMm {
+    bool operator()(const std::unique_ptr<Event> &a,
+		    const char *b) const {
+	return a->event_datetime < b;
     }
-    return m;
-}
-int Store::allocRecNo(const std::string& stamp) {
-    auto it = seqAtStamp_.find(stamp);
-    int next = (it != seqAtStamp_.end()) ? it->second : (scanMaxOwnRn(stamp) + 1);
-    seqAtStamp_[stamp] = next + 1;
-    return next;
+    bool operator()(const char *a,
+		    const std::unique_ptr<Event> &b) const {
+	return a < b->event_datetime.substr(0, 7);
+    }
+};
+
+int Store::allocRecNo(const std::string &stamp, int yyyymm) {
+    if(stamp > lastEdit_) {
+	lastEdit_ = stamp;
+	lastEditSeq_ = 0;
+	return 0;
+    }
+    else if(stamp == lastEdit_) return ++lastEditSeq_;
+    else {
+	int seq = 0;
+	char yyyy_mm_s[8];
+	std::snprintf(yyyy_mm_s, sizeof(yyyy_mm_s), "%04d-%02d",
+		      yyyymm / 100, yyyymm % 100);
+	auto r = std::equal_range(events_.begin(), events_.end(),
+				  std::to_string(yyyymm), CompareYyyyMm());
+	for(auto p = r.first; p < r.second; ++p) {
+	    auto v = **p;
+	    if(v.dev_no == deviceNo_ && v.edit_datetime == stamp &&
+	       v.rec_no >= seq)
+		seq = v.rec_no + 1;
+	}
+	return seq;
+    }
 }
 
 void Store::appendToMonth(int yyyymm, const std::string& line) {
     appendLine(monthPath(yyyymm), line);
 }
 void Store::ensureCanonicalHeader(int yyyymm) {
-    Schema can = canonicalSchema();
-    auto &cur = monthSchema_[yyyymm];
-    if(cur != can) {
+    if(otherSchemaMonths_.count(yyyymm)) {
         appendToMonth(yyyymm, canonicalHeaderLine());
-	cur = can;
+	otherSchemaMonths_.erase(yyyymm);
     }
 }
 
 bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update) {
-    std::string dkey = keyStr(tgtEdit, tgtRn, tgtDn) + "|" + (update ? "1" : "0");
-    if (sync_) { ensureDeleteKeysLoaded(); if (sync_->deleteKeys.count(dkey)) return false; }
+    if (sync_) ; // TODO +++ { ensureDeleteKeysLoaded(); if (sync_->deleteKeys.count(dkey)) return false; }
     std::string stamp = nowStamp();
-    int rn = allocRecNo(stamp);
     int ym = yyyymmOf(tgtEdit);
+    int rn = allocRecNo(stamp, ym);
     ensureCanonicalHeader(ym);
     json::object o;
     json::array del; del.emplace_back(jv(tgtEdit)); del.emplace_back(tgtRn); del.emplace_back(tgtDn);
@@ -450,10 +463,11 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     o["this"]   = std::move(ths);
     if (update) o["update"] = true;
     appendToMonth(ym, json::serialize(o));
-    if (sync_) sync_->deleteKeys.insert(dkey);
+    if (sync_) ; // TODO +++ sync_->deleteKeys.insert(dkey);
     return true;
 }
 
+    // TODO +++ revision mark
 Event Store::addEvent(const std::string& event_datetime, const std::string& subject,
                       double cost, std::optional<std::string> people,
                       std::optional<std::string> volume, std::optional<std::string> comment) {
@@ -583,7 +597,7 @@ std::set<std::string> Store::categoryMembers(const std::string& category) const 
 fs::path Store::certPath() const { return root_ / "identity" / "cert.pem"; }
 fs::path Store::keyPath()  const { return root_ / "identity" / "key.pem"; }
 
-void Store::ensureIdentity() {
+void Store::ensureIdentity(bool forceSaveConfig) {
     if (!fs::exists(certPath()) || !fs::exists(keyPath())) {
         fs::create_directories(root_ / "identity");
         crypto::generateSelfSigned("DomUchet-Device", keyPath().string(), certPath().string());
@@ -594,6 +608,7 @@ void Store::ensureIdentity() {
     for (auto& d : devices_)
         if (d.pubkey == myPubkey_) {
             if (deviceNo_ != d.no) { deviceNo_ = d.no; saveConfig(); }
+	    else if(forceSaveConfig) saveConfig();
             return;
         }
         else {
