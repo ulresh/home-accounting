@@ -480,6 +480,7 @@ git diff bb1807f632e2c16b8a0577820a64f3ab14427bc3 -- desktop/
 
 getFilesDir()/Основная/sync/DN.jsonl
 {"header":[...],"reference":[...]}
+["device-map",remote-dn,local-dn,...]
 ["device",size,"<sha1sum>"]
 ["people",size,"<sha1sum>"]
 ["catalog",size,"<sha1sum>"]
@@ -494,6 +495,7 @@ getFilesDir()/Основная/sync/DN.jsonl
 запуска новой версии со старой базой), для месячных файлов пишу заголовок,
 если последний полученный от собеседника заголовок отличается от
 моего канонического.
+
 
 
 

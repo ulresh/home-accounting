@@ -73,6 +73,9 @@ struct CompareYyyyMm {
 struct FileState {
     uint64_t size = 0;
     std::string sha1;
+    bool operator != (const FileState &rhs) const {
+	return size != rhs.size || sha1 != rhs.sha1;
+    }
     auto serialize(std::string_view name) const {
 	json::array a;
 	a.emplace_back(name);
@@ -87,7 +90,7 @@ struct FileState {
 // файл блоками и сразу шлёт. Кадры:
 //   kind = "event-tail"   -> [event-tail, yyyymm, offset, size]\n<данные>\n
 //   kind = "device-data"  -> [device-data, size]\n<данные>\n  (people/catalog — аналогично)
-struct SyncSendItem {
+/* TODO +++ struct SyncSendItem {
     std::string           kind;
     int                   month  = 0;     // yyyymm (event-tail)
     long long             offset = 0;     // смещение в кадре (event-tail)
@@ -96,7 +99,7 @@ struct SyncSendItem {
     long long             fileFrom = 0;
     long long             fileLen  = 0;
     long long frameSize() const { return (long long)prepend.size() + fileLen; }
-};
+};*/
 
 // Схема событийной строки: порядок/состав колонок и состав «ссылки» (reference),
 // по которой строятся delete/this. Собеседник может прислать другой порядок —
@@ -112,7 +115,7 @@ struct Schema {
 };
 
 // Манифест справочников (для обмена «состоянием» в начале сессии).
-struct ListManifest {
+struct ListManifest { // TODO +++ убрать ListManifest, поля переместить в SyncIndex
     FileState people, catalog, device;
 };
 struct MonthSyncData {
@@ -120,6 +123,7 @@ struct MonthSyncData {
     Schema header;
 };
 struct SyncIndex : ListManifest {
+    std::map<int, int> dnMap; // DN партнёра -> наш DN
     std::map<int, MonthSyncData> events;
 };
 
@@ -203,7 +207,7 @@ public:
     // Решение принимается по СОСТОЯНИЮ СОБЕСЕДНИКА: справочники шлём, только если
     // наша версия отличается от того, что у партнёра (peer); хвосты — от offset,
     // который партнёр уже получил.
-    std::vector<SyncSendItem> syncPlanOutgoing(const ListManifest& peer) const;
+    // TODO +++ std::vector<SyncSendItem> syncPlanOutgoing(const ListManifest& peer) const;
 
     // Потоковый приём блока: begin -> feed(блоки сети) -> finish. Применяется
     // сразу по мере поступления, без накопления всего блока в памяти.
@@ -220,7 +224,7 @@ public:
     int  syncReceived() const { return sync_ ? sync_->received : 0; }
 
     // Действующий заголовок (схема) месяца — для дозаписи заголовка перед хвостом.
-    std::string inEffectHeader(int yyyymm) const;
+    // TODO +++ std::string inEffectHeader(int yyyymm) const;
 
     std::filesystem::path root() const { return root_; }
 
@@ -280,16 +284,19 @@ private:
 
     // Состояние активной сессии синхронизации (между syncBegin/syncEnd).
     struct SyncSession {
-        int peerDn = 0;
-        std::map<int, long long> offsets;        // СОСТОЯНИЕ СОБЕСЕДНИКА: yyyymm -> сколько наших байт у него
-        std::map<int, int> dnMap;                // DN партнёра -> наш DN
+	SyncSession(const Store &s, int peerDn)
+	    : peerDn(peerDn)
+	    , index(s.loadSyncIndex(peerDn))
+	{}
+        int peerDn;
+	SyncIndex index;
         std::set<std::string> deleteKeys;        // дедуп строк удаления (лениво)
         bool deleteKeysLoaded = false;
         int received = 0;
         std::unique_ptr<RecvState> recv;         // текущий принимаемый блок
     };
     std::unique_ptr<SyncSession> sync_;
-    void ensureDeleteKeysLoaded();
+    // TODO +++ void ensureDeleteKeysLoaded();
     void handleRecvValue(const json::value& v);
 };
 

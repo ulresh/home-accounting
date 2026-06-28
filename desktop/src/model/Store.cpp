@@ -661,6 +661,12 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 		auto s = a[0].as_string();
 		FileState *p;
 		if(s == "device") p = &idx.device;
+		else if(s == "device-map") {
+		    for(int r = 1, l = 2; l < a.size(); ++r, ++l)
+			if(a[r].is_uint64() && a[l].is_uint64())
+			    idx.dnMap[a[r].as_uint64()] = a[l].as_uint64();
+		    return;
+		}
 		else if(s == "people") p = &idx.people;
 		else if(s == "catalog") p = &idx.catalog;
 		else return;
@@ -681,6 +687,11 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
     std::stringstream content;
     content << canonicalHeaderLine() << "\n";
+    if(!idx.dnMap.empty()) {
+	content << "[\"device-map\"";
+	for(auto &[r,l] : idx.dnMap) content << ',' << r << ',' << l;
+	content << "]\n";
+    }
     content << idx.device.serialize("device"sv) << "\n";
     content << idx.people.serialize("people"sv) << "\n";
     content << idx.catalog.serialize("catalog"sv) << "\n";
@@ -695,16 +706,12 @@ void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
     writeAtomic(syncIndexPath(peerDn), content.str());
 }
 
-// TODO +++ revision mark
-#if 0
 void Store::syncBegin(int peerDn) {
-    sync_ = std::make_unique<SyncSession>();
-    sync_->peerDn = peerDn;
-    sync_->offsets = loadSyncIndex(peerDn);
+    sync_ = std::make_unique<SyncSession>(*this, peerDn);
 }
 void Store::syncEnd() { sync_.reset(); }
 
-void Store::ensureDeleteKeysLoaded() {
+/* TODO +++ void Store::ensureDeleteKeysLoaded() {
     if (!sync_ || sync_->deleteKeysLoaded) return;
     for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
         (void)yyyymm;
@@ -721,18 +728,18 @@ void Store::ensureDeleteKeysLoaded() {
         });
     }
     sync_->deleteKeysLoaded = true;
-}
+}*/
 
-std::string Store::inEffectHeader(int yyyymm) const {
+/* TODO +++ std::string Store::inEffectHeader(int yyyymm) const {
     auto it = monthSchema_.find(yyyymm);
     if (it == monthSchema_.end()) return canonicalHeaderLine();
     return headerLineFor(it->second);
-}
+}*/
 
 // Что отправить партнёру (только планы — данные в память не накапливаем).
 // Справочники шлём, только если у партнёра другая версия (его манифест);
 // события — хвостом от offset, который у партнёра уже есть.
-std::vector<SyncSendItem> Store::syncPlanOutgoing(const ListManifest& peer) const {
+/* TODO +++ std::vector<SyncSendItem> Store::syncPlanOutgoing(const ListManifest& peer) const {
     std::vector<SyncSendItem> out;
     // device-data — всегда (получателю нужен наш список устройств для DN-map).
     out.push_back(SyncSendItem{"device-data", 0, 0, "", dbDir() / "device.jsonl", 0,
@@ -759,8 +766,10 @@ std::vector<SyncSendItem> Store::syncPlanOutgoing(const ListManifest& peer) cons
         out.push_back(std::move(it));
     }
     return out;
-}
+}*/
 
+// TODO +++ revision mark
+#if 0
 // ---- потоковый приём блока (инкрементно, без накопления всего блока) ----
 void Store::syncRecvBegin(const std::string& kind, int month, bool replaceLists) {
     if (!sync_) return;
