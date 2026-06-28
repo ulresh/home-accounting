@@ -125,12 +125,14 @@ public:
     int  fontSize() const { return fontSize_; }
     void setFontSize(int pt);
 
+    typedef std::set<std::string> People;
+    typedef std::map<std::string, std::set<std::string> > Catalog;
     typedef std::set<std::shared_ptr<Event>, CompareEventsSet> Events;
     typedef std::vector<std::shared_ptr<Event> > TempEvents;
     // --- доступ к данным (текущее видимое состояние) ---
     const Events &events() const { return events_; }
-    const std::vector<std::string>&  people()  const { return people_; }
-    const std::vector<CatalogEntry>& catalog() const { return catalog_; }
+    const People &people() const { return people_; }
+    const Catalog &catalog() const { return catalog_; }
     const std::vector<Device>&       devices() const { return devices_; }
 
     std::string categoryOf(const std::string& subject) const;
@@ -151,10 +153,11 @@ public:
     void addPerson(const std::string& name);
     void removePerson(const std::string& name);
     void upsertCatalog(const CatalogEntry& e);
-    void replaceCatalog(const std::vector<CatalogEntry>& list);
+    void replaceCatalog(const Catalog &list);
 
-    std::set<std::string> categoryMembers(const std::string& category) const;
-    std::vector<Event> filter(const std::string& q) const;
+    void categoryMembers(std::set<std::string> &result,
+			 Catalog::const_reference category) const;
+    TempEvents filter(const std::string& q) const;
 
     // --- идентичность устройства ---
     void ensureIdentity(bool forceSaveConfig = false);
@@ -238,8 +241,8 @@ private:
     int fontSize_ = 0;
     std::string myPubkey_;
 
-    std::vector<std::string>  people_;
-    std::vector<CatalogEntry> catalog_;
+    People people_;
+    Catalog catalog_;
     std::vector<Device>       devices_;
     Events events_;
 

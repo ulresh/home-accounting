@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-#include <vector>
+#include <set>
 #include <optional>
 #include <cstdint>
 
@@ -36,7 +36,7 @@ struct Device {
 // Строка каталога: первый элемент — категория, остальные — позиции.
 struct CatalogEntry {
     std::string category;
-    std::vector<std::string> items;
+    std::set<std::string> items;
 };
 
 } // namespace ha

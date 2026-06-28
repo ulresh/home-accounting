@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <sstream>
 #include <fstream>
+#include <list>
 #include <iterator>
 #include <vector>
 
@@ -300,7 +301,8 @@ void Store::saveDevices() {
 void Store::loadPeople() {
     people_.clear();
     readValues(dbDir() / "people.jsonl", [&](const json::value& v){
-        if (v.is_string()) people_.push_back(std::string(v.as_string()));
+        if (v.is_string())
+	    people_.insert(people_.end(), std::string(v.as_string()));
     });
 }
 void Store::savePeople() {
@@ -315,10 +317,11 @@ void Store::loadCatalog() {
         try {
             auto& a = v.as_array();
             if (a.empty()) return;
-            CatalogEntry e;
-            e.category = std::string(a[0].as_string());
-            for (size_t i = 1; i < a.size(); ++i) e.items.push_back(std::string(a[i].as_string()));
-            catalog_.push_back(std::move(e));
+	    auto p = catalog_.try_emplace(catalog_.end(),
+					  std::string(a[0].as_string()));
+            for (size_t i = 1; i < a.size(); ++i)
+		p->second.insert(p->second.end(),
+				 std::string(a[i].as_string()));
         } catch (...) {}
     });
 }
@@ -326,8 +329,8 @@ void Store::saveCatalog() {
     std::string content;
     for (auto& e : catalog_) {
         json::array a;
-        a.emplace_back(e.category);
-        for (auto& it : e.items) a.emplace_back(it);
+        a.emplace_back(e.first);
+        for (auto& it : e.second) a.emplace_back(it);
         content += json::serialize(a) + "\n";
     }
     writeAtomic(dbDir() / "catalog.jsonl", content);
@@ -393,8 +396,7 @@ void Store::applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r) {
 
 std::string Store::categoryOf(const std::string& subject) const {
     for (auto& e : catalog_)
-        for (auto& it : e.items)
-            if (it == subject) return e.category;
+	if(e.second.contains(subject)) return e.first;
     return {};
 }
 
@@ -490,33 +492,19 @@ Event Store::editEvent(const std::shared_ptr<Event> &oldEv,
 
 void Store::addPerson(const std::string& name) {
     if (name.empty()) return;
-    if (std::find(people_.begin(), people_.end(), name) != people_.end()) return;
-    people_.push_back(name);
-    savePeople();
+    if(people_.insert(name).second)
+	savePeople();
 }
 void Store::removePerson(const std::string& name) {
-    auto it = std::find(people_.begin(), people_.end(), name);
-    if (it != people_.end()) { people_.erase(it); savePeople(); }
+    if(people_.erase(name)) savePeople();
 }
 
 void Store::upsertCatalog(const CatalogEntry& e) {
-    for (auto& c : catalog_) {
-        if (c.category == e.category) {
-	    bool changed = false;
-            for (auto& it : e.items)
-                if (std::find(c.items.begin(), c.items.end(), it) ==
-		    c.items.end()) {
-                    c.items.push_back(it);
-		    changed = true;
-		}
-            if(changed) saveCatalog();
-            return;
-        }
-    }
-    catalog_.push_back(e);
+    auto [p,a] = catalog_.try_emplace(e.category, e.items);
+    if(!a) p->second.insert(e.items.begin(), e.items.end());
     saveCatalog();
 }
-void Store::replaceCatalog(const std::vector<CatalogEntry>& list) {
+void Store::replaceCatalog(const Catalog &list) {
     catalog_ = list;
     saveCatalog();
 }
@@ -544,45 +532,42 @@ static bool icontains(const std::string& hay, const std::string& needle) {
     return utf8Lower(hay).find(utf8Lower(needle)) != std::string::npos;
 }
 
-// TODO +++ revision mark
-#if 0
-std::vector<Event> Store::filter(const std::string& q) const {
-    auto all = events();
-    if (q.empty()) return all;
-    std::set<std::string> memberSet;
-    for (auto& c : catalog_)
-        if (icontains(c.category, q)) {
-            auto m = categoryMembers(c.category);
-            memberSet.insert(m.begin(), m.end());
-        }
-    std::vector<Event> out;
-    for (auto& e : all) {
-        bool bySubject  = icontains(e.subject, q);
-        bool byPerson   = e.people && icontains(*e.people, q);
-        bool byComment  = e.comment && icontains(*e.comment, q);
-        bool byCategory = memberSet.count(e.subject) > 0;
-        if (bySubject || byPerson || byComment || byCategory) out.push_back(e);
+Store::TempEvents Store::filter(const std::string& q) const {
+    TempEvents out;
+    if (q.empty()) {
+	out.reserve(events_.size());
+	out.insert(out.end(), events_.begin(), events_.end());
+    }
+    else {
+	std::set<std::string> memberSet;
+	for (auto& c : catalog_)
+	    if (icontains(c.first, q))
+		categoryMembers(memberSet, c);
+	for(auto &&e : events_)
+	    if(icontains(e->subject, q) ||
+	       icontains(e->people, q) ||
+	       icontains(e->comment, q) ||
+	       icontains(e->subject, q) ||
+	       memberSet.contains(e->subject)) out.push_back(e);
     }
     return out;
 }
 
-std::set<std::string> Store::categoryMembers(const std::string& category) const {
-    std::set<std::string> result, visited;
-    std::vector<std::string> stack{category};
+void Store::categoryMembers(std::set<std::string> &result,
+			    Catalog::const_reference category) const {
+    std::list<const Catalog::mapped_type *> stack;
+    stack.push_back(&category.second);
     while (!stack.empty()) {
-        std::string cat = stack.back(); stack.pop_back();
-        if (visited.count(cat)) continue;
-        visited.insert(cat);
-        for (auto& e : catalog_) {
-            if (e.category != cat) continue;
-            for (auto& it : e.items) {
-                result.insert(it);
-                for (auto& e2 : catalog_)
-                    if (e2.category == it) { stack.push_back(it); break; }
-            }
-        }
+        auto cat = stack.back(); stack.pop_back();
+	for(auto &item : *cat) {
+	    auto [p,added] = result.insert(item);
+	    if(added) {
+		auto child = catalog_.find(item);
+		if(child != catalog_.end())
+		    stack.push_back(&child->second);
+	    }
+	}
     }
-    return result;
 }
 
 // ---- идентичность ----
@@ -614,6 +599,8 @@ void Store::ensureIdentity(bool forceSaveConfig) {
     saveConfig();
 }
 
+// TODO +++ revision mark
+#if 0
 bool Store::knowsDevice(const std::string& pubkey) const {
     for (auto& d : devices_) if (d.pubkey == pubkey) return true;
     return false;
