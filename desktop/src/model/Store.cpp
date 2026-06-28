@@ -3,7 +3,6 @@
 #include "Jsonl.h"
 #include "../sync/Crypto.h"
 
-#include <boost/json.hpp>
 #include <openssl/evp.h>
 #include <ctime>
 #include <cmath>
@@ -14,8 +13,8 @@
 #include <iterator>
 #include <vector>
 
+using namespace std::literals::string_view_literals;
 namespace fs = std::filesystem;
-namespace json = boost::json;
 
 namespace ha {
 
@@ -76,7 +75,7 @@ static FileState stateOf(const fs::path& p) {
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr);
     std::vector<char> block(64 * 1024);
-    long long total = 0; bool any = false;
+    uint64_t total = 0; bool any = false;
     while (in) {
         in.read(block.data(), (std::streamsize)block.size());
         std::streamsize got = in.gcount();
@@ -100,16 +99,21 @@ static Schema canonicalSchema() {
         {"event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"},
         {"edit_datetime","rec_no","dev_no"}};
 }
-static std::string headerLineFor(const Schema& s) {
+inline json::object headerObjectFor(const Schema& s) {
     json::object o;
     json::array cols, ref;
     for (auto& c : s.columns) cols.emplace_back(c);
     for (auto& r : s.reference) ref.emplace_back(r);
     o["header"] = std::move(cols);
     o["reference"] = std::move(ref);
-    return json::serialize(o);
+    return o;
 }
-static std::string canonicalHeaderLine() { return headerLineFor(canonicalSchema()); }
+inline std::string headerLineFor(const Schema& s) {
+    return json::serialize(headerObjectFor(s));
+}
+inline std::string canonicalHeaderLine() {
+    return headerLineFor(canonicalSchema());
+}
 static Schema schemaFromHeader(const json::object& o) {
     Schema s;
     if (auto* h = o.if_contains("header"))
@@ -599,13 +603,11 @@ void Store::ensureIdentity(bool forceSaveConfig) {
     saveConfig();
 }
 
-// TODO +++ revision mark
-#if 0
 bool Store::knowsDevice(const std::string& pubkey) const {
     for (auto& d : devices_) if (d.pubkey == pubkey) return true;
     return false;
 }
-int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name) {
+/* TODO +++ int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name) {
     for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
     int maxNo = 0; bool taken = false;
     for (auto& d : devices_) { maxNo = std::max(maxNo, d.no); if (d.no == preferredNo) taken = true; }
@@ -613,9 +615,9 @@ int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std
     devices_.push_back(Device{no, pubkey, name});
     saveDevices();
     return no;
-}
+}*/
 bool Store::hasData() const {
-    if (anyEventLines_) return true;
+    if (!events_.empty()) return true;
     if (!people_.empty()) return true;
     if (!catalog_.empty()) return true;
     for (auto& d : devices_) if (d.pubkey != myPubkey_) return true;
@@ -645,27 +647,56 @@ ListManifest Store::listManifest() const {
     return m;
 }
 
-// Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего месячного
-// файла у него уже есть. (Старые записи со строковым ключом / sha игнорируем.)
-std::map<int, long long> Store::loadSyncIndex(int peerDn) const {
-    std::map<int, long long> off;
+// Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего
+// месячного файла у него уже есть.
+SyncIndex Store::loadSyncIndex(int peerDn) const {
+    SyncIndex idx;
+    Schema header = canonicalSchema();
     readValues(syncIndexPath(peerDn), [&](const json::value& v){
-        if (!v.is_array()) return;
-        auto& a = v.as_array();
-        if (a.size() < 2 || !(a[0].is_int64() || a[0].is_uint64())) return;
-        off[asInt(a[0])] = (long long)asInt(a[1]);
+	if(v.is_object()) header = schemaFromHeader(v.as_object());
+        else if(v.is_array()) {
+	    auto& a = v.as_array();
+	    if(a.size() >= 3 && a[0].is_string() && a[1].is_uint64() &&
+	       a[2].is_string()) {
+		auto s = a[0].as_string();
+		FileState *p;
+		if(s == "device") p = &idx.device;
+		else if(s == "people") p = &idx.people;
+		else if(s == "catalog") p = &idx.catalog;
+		else return;
+		p->size = a[1].as_int64();
+		p->sha1 = a[2].as_string();
+	    }
+	    else if (a.size() >= 2 && a[0].is_uint64() && a[1].is_uint64()) {
+		if(a.size() >= 3 && a[2].is_object())
+		    idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
+			schemaFromHeader(a[2].as_object()) };
+		else idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
+						      header };
+	    }
+	}
     });
-    return off;
+    return idx;
 }
-void Store::saveSyncIndex(int peerDn, const std::map<int, long long>& off) const {
-    std::string content;
-    for (auto& [month, o] : off) {
-        json::array a; a.emplace_back((int64_t)month); a.emplace_back((int64_t)o);
-        content += json::serialize(a) + "\n";
+void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
+    std::stringstream content;
+    content << canonicalHeaderLine() << "\n";
+    content << idx.device.serialize("device"sv) << "\n";
+    content << idx.people.serialize("people"sv) << "\n";
+    content << idx.catalog.serialize("catalog"sv) << "\n";
+    auto can = canonicalSchema();
+    for (auto& [month, o] : idx.events) {
+        json::array a;
+	a.emplace_back(month);
+	a.emplace_back(o.offset);
+	if(o.header != can) a.emplace_back(headerObjectFor(o.header));
+        content << json::serialize(a) << "\n";
     }
-    writeAtomic(syncIndexPath(peerDn), content);
+    writeAtomic(syncIndexPath(peerDn), content.str());
 }
 
+// TODO +++ revision mark
+#if 0
 void Store::syncBegin(int peerDn) {
     sync_ = std::make_unique<SyncSession>();
     sync_->peerDn = peerDn;

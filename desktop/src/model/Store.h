@@ -7,8 +7,9 @@
 #include <vector>
 #include <optional>
 #include <memory>
-#include <boost/json/stream_parser.hpp>
-#include <boost/json/value.hpp>
+#include <boost/json.hpp>
+
+namespace json = boost::json;
 
 namespace ha {
 
@@ -70,8 +71,15 @@ struct CompareYyyyMm {
 
 // Состояние файла для инкрементной синхронизации: размер и контрольная сумма.
 struct FileState {
-    long long   size = 0;
+    uint64_t size = 0;
     std::string sha1;
+    auto serialize(std::string_view name) const {
+	json::array a;
+	a.emplace_back(name);
+	a.emplace_back(size);
+	a.emplace_back(sha1);
+	return json::serialize(a);
+    }
 };
 
 // План отправки одного блока БЕЗ данных в памяти: заголовок-строка + (опц.)
@@ -90,11 +98,6 @@ struct SyncSendItem {
     long long frameSize() const { return (long long)prepend.size() + fileLen; }
 };
 
-// Манифест справочников (для обмена «состоянием» в начале сессии).
-struct ListManifest {
-    FileState people, catalog, device;
-};
-
 // Схема событийной строки: порядок/состав колонок и состав «ссылки» (reference),
 // по которой строятся delete/this. Собеседник может прислать другой порядок —
 // мы храним строки так, как получили (только с DN map), поэтому в одном файле
@@ -106,6 +109,18 @@ struct Schema {
         return columns == o.columns && reference == o.reference;
     }
     bool operator!=(const Schema& o) const { return !(*this == o); }
+};
+
+// Манифест справочников (для обмена «состоянием» в начале сессии).
+struct ListManifest {
+    FileState people, catalog, device;
+};
+struct MonthSyncData {
+    uint64_t offset;
+    Schema header;
+};
+struct SyncIndex : ListManifest {
+    std::map<int, MonthSyncData> events;
 };
 
 // Центральное хранилище: события — только дозапись; справочники — атомарная
@@ -166,7 +181,7 @@ public:
     std::filesystem::path keyPath() const;
 
     bool knowsDevice(const std::string& pubkey) const;
-    int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
+    // TODO +++ int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
     bool hasData() const;
     int  maxDeviceNo() const;
     void renumberSelf(int newNo);
@@ -177,8 +192,8 @@ public:
 
     // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
-    std::map<int, long long> loadSyncIndex(int peerDn) const;
-    void saveSyncIndex(int peerDn, const std::map<int, long long>& off) const;
+    SyncIndex loadSyncIndex(int peerDn) const;
+    void saveSyncIndex(int peerDn, const SyncIndex &idx) const;
 
     // Начать/закончить сессию синхронизации с партнёром (peerDn — его номер у нас).
     void syncBegin(int peerDn);
@@ -255,7 +270,7 @@ private:
         std::string kind;
         int month = 0;
         bool replaceLists = false;
-        boost::json::stream_parser sp;
+        json::stream_parser sp;
         bool atStart = true;
         Schema cur;
         bool headerReceived = false;
@@ -275,7 +290,7 @@ private:
     };
     std::unique_ptr<SyncSession> sync_;
     void ensureDeleteKeysLoaded();
-    void handleRecvValue(const boost::json::value& v);
+    void handleRecvValue(const json::value& v);
 };
 
 } // namespace ha
