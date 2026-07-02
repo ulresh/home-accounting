@@ -498,6 +498,14 @@ getFilesDir()/Основная/sync/DN.jsonl
 
 
 
+!2026-07-03 00:20:08
+* Crypto - все *free перевести на unique_ptr как в b64 иначе throw приводят к потерям памяти
+* Crypto - заменить vector на unique_ptr/MallocPtr:
+struct MallocDeleter{void operator()(void*p)const{std::free(p);}};
+std::unique_ptr<char, MallocDeleter> p(static_cast<char*>(std::malloc(10)), MallocDeleter{});
+template<typename T> struct MallocPtr : std::unique_ptr<T, MallocDeleter> { MallocPtr(std::size_t size) : unique_ptr(static_cast<T*>(std::malloc(size)), MallocDeleter{}) { if(!get()) throw std::bad_alloc(); } };
+
+
 
 
 
@@ -522,6 +530,9 @@ TODO
 в read тоже
 * Store::loadEvents === check point - он перемудрил с удалениями, переделать
 * Проверить что он там накрутил с DN при синхронизации.
+TODO
+* QrCode - заменить все vector<bool> на bitset, не забыть использовать reserve
+* QrCode - всё же провести ревизию и алгоритма тоже
 --
 CLAUDE TASK
 END OF TASK
