@@ -11,8 +11,8 @@
 struct MallocDeleter{void operator()(void*p)const{std::free(p);}};
 template<typename T> struct MallocPtr : std::unique_ptr<T, MallocDeleter> {
     MallocPtr(std::size_t size)
-	: unique_ptr(static_cast<T*>(std::malloc(size)), MallocDeleter{})
-    { if(!get()) throw std::bad_alloc(); }
+	: std::unique_ptr<T, MallocDeleter>(static_cast<T*>(std::malloc(size)), MallocDeleter{})
+    { if(!std::unique_ptr<T, MallocDeleter>::get()) throw std::bad_alloc(); }
 };
 
 namespace ha::crypto {
@@ -93,7 +93,7 @@ std::string publicKeyFromCert(const std::string& certPemPath) {
 
 std::string publicKeyFromCertPem(const std::string& certPem) {
     BioPtr bio(BIO_new_mem_buf(certPem.data(), (int)certPem.size()));
-    if(!b64bio.get()) throw std::bad_alloc();
+    if(!bio.get()) throw std::bad_alloc();
     X509Ptr x509(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
     if (!x509.get()) throw std::runtime_error("parse cert pem");
     return spkiB64(x509.get());
