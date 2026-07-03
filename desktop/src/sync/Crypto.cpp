@@ -5,18 +5,22 @@
 #include <openssl/ec.h>
 #include <openssl/bio.h>
 #include <openssl/rand.h>
+#include <openssl/ssl.h>
 #include <stdexcept>
 #include <memory>
 
+namespace {
 struct MallocDeleter{void operator()(void*p)const{std::free(p);}};
 template<typename T> struct MallocPtr : std::unique_ptr<T, MallocDeleter> {
     MallocPtr(std::size_t size)
 	: std::unique_ptr<T, MallocDeleter>(static_cast<T*>(std::malloc(size)), MallocDeleter{})
     { if(!std::unique_ptr<T, MallocDeleter>::get()) throw std::bad_alloc(); }
 };
+} // namespace
 
 namespace ha::crypto {
 
+namespace {
 #define H(n,t,f) \
 struct n##Free { void operator()(t* p) const { if(p) f(p); } }; \
 using n##Ptr = std::unique_ptr<t, n##Free>;
@@ -39,6 +43,7 @@ std::string b64(const unsigned char* data, int len) {
     long n = BIO_get_mem_data(mem, &p);
     return std::string(p, n);
 }
+} // namespace
 
 void generateSelfSigned(const std::string& cn,
                         const std::string& keyPemPath,
@@ -97,6 +102,21 @@ std::string publicKeyFromCertPem(const std::string& certPem) {
     X509Ptr x509(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
     if (!x509.get()) throw std::runtime_error("parse cert pem");
     return spkiB64(x509.get());
+}
+
+std::string peerPubkey(const void *ssl) {
+    X509Ptr cert(SSL_get1_peer_certificate(static_cast<const SSL *>(ssl)));
+    if(!cert.get()) return {};
+    /*
+    BioPtr bio(BIO_new(BIO_s_mem()));
+    if(!bio.get()) return {};
+    PEM_write_bio_X509(bio.get(), cert.get());
+    char* p = nullptr;
+    long n = BIO_get_mem_data(bio.get(), &p);
+    try { return publicKeyFromCertPem(std::string(p, n)); }
+    */
+    try { return spkiB64(cert.get()); }
+    catch (...) { return {}; }
 }
 
 } // namespace ha::crypto

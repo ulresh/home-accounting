@@ -82,16 +82,7 @@ std::string localIPv4() {
 }
 
 std::string peerPubkey(SslStream& s) {
-    X509* cert = SSL_get1_peer_certificate(s.native_handle());
-    if (!cert) return "";
-    BIO* bio = BIO_new(BIO_s_mem());
-    PEM_write_bio_X509(bio, cert);
-    char* p = nullptr;
-    long n = BIO_get_mem_data(bio, &p);
-    std::string pem(p, n);
-    BIO_free(bio);
-    X509_free(cert);
-    try { return crypto::publicKeyFromCertPem(pem); } catch (...) { return ""; }
+    return crypto::peerPubkey(s.native_handle());
 }
 
 void configureContext(ssl::context& ctx, Store& store) {

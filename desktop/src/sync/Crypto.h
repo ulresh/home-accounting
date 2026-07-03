@@ -14,5 +14,6 @@ std::string publicKeyFromCert(const std::string& certPemPath);
 
 // То же, но из объекта сертификата по пути в памяти (PEM-строка).
 std::string publicKeyFromCertPem(const std::string& certPem);
+std::string peerPubkey(const void *ssl);
 
 } // namespace ha::crypto

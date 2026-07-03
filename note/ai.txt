@@ -506,6 +506,17 @@ std::unique_ptr<char, MallocDeleter> p(static_cast<char*>(std::malloc(10)), Mall
 template<typename T> struct MallocPtr : std::unique_ptr<T, MallocDeleter> { MallocPtr(std::size_t size) : unique_ptr(static_cast<T*>(std::malloc(size)), MallocDeleter{}) { if(!get()) throw std::bad_alloc(); } };
 
 
+!2026-07-03 18:23:47
+
+CLAUDE SINGLE DEFAULT folder=home-accounting session=
+
+Для чего нужны безымянные namespace в коде desktop приложения?
+Например в desktop/src/sync/SyncService.cpp.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting sessionId=115e68e5-9e75-4578-9ae6-1cfac336a61a | отправлено 2026-07-03 18:25:41 | завершено 2026-07-03 18:26:24 ====
+
+
 
 
 
