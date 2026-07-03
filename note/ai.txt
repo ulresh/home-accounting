@@ -544,6 +544,9 @@ TODO
 TODO
 * QrCode - заменить все vector<bool> на bitset, не забыть использовать reserve
 * QrCode - всё же провести ревизию и алгоритма тоже
+* SyncService - aReadLine - заменить на разбор json
+* SyncService - подключение с неправильным кодом потребует перезапуск сервера
+* SyncService - заменить корутины на каллбаки
 --
 CLAUDE TASK
 END OF TASK
