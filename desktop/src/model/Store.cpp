@@ -628,11 +628,23 @@ int Store::maxDeviceNo() const {
     for (auto& d : devices_) m = std::max(m, d.no);
     return m;
 }
-void Store::renumberSelf(int newNo) {
+/*void Store::renumberSelf(int newNo) {
     for (auto& d : devices_) if (d.pubkey == myPubkey_) d.no = newNo;
     deviceNo_ = newNo;
     saveDevices();
     saveConfig();
+}*/
+
+int Store::addDevice(std::string_view pubkey) {
+    int m = 0;
+    for(auto& d : devices_) {
+	if(d.pubkey == pubkey)
+	    throw std::runtime_error("double public key"sv);
+	if(m < d.no) m = d.no;
+    }
+    devices_.push_back(Device{++m, pubkey});
+    saveDevices();
+    return m;
 }
 
 // =====================================================================

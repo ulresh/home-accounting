@@ -547,6 +547,9 @@ TODO
 * SyncService - aReadLine - заменить на разбор json
 * SyncService - подключение с неправильным кодом потребует перезапуск сервера
 * SyncService - заменить корутины на каллбаки
+* SyncService - QSslSocket
+* SyncService - renumberSelf
+* SyncService - !d.store.knowsDevice
 --
 CLAUDE TASK
 END OF TASK

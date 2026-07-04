@@ -130,6 +130,26 @@ asio::awaitable<void> aWriteLine(SslStream& s, std::string line) {
     co_await asio::async_write(s, asio::buffer(line), asio::use_awaitable);
 }
 
+asio::awaitable<void> aStreamFullFile(SslStream& s, std::string_view name,
+				      fs::path path) {
+    {   json::array h;
+	h.emplace_back(name);
+	h.emplace_back((uint64_t)fs::file_size(path));
+	co_await aWriteLine(s, json::serialize(h));
+    }
+    std::ifstream in(path, std::ios::binary);
+    char block[16384];
+    while (in) {
+        in.read(block, sizeof(block));
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got),
+				   asio::use_awaitable);
+    }
+    co_await aWrite(s, "\n");
+}
+
+/*
 // Прочитать файл [from, from+len) блоками и сразу слать в сеть (без накопления).
 asio::awaitable<void> aStreamFile(SslStream& s, fs::path path, long long from, long long len) {
     std::ifstream in(path, std::ios::binary);
@@ -214,6 +234,7 @@ std::string summaryLine(int received) {
 int summaryReceived(const std::string& line) {
     return (int)json::parse(line).as_object().at("summary").as_object().at("received").as_int64();
 }
+*/
 
 } // namespace
 
@@ -277,33 +298,72 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
         std::string peer = peerPubkey(*stream);
         res.peerPubkey = peer;
 
-        auto hv = json::parse(co_await aReadLine(*stream, rbuf));
-        auto& ho = hv.as_object().at("hello").as_object();
-        std::string clientDb = std::string(ho.at("db").as_string());
-        std::string clientCode = std::string(ho.at("code").as_string());
-        int clientDevNo = ho.if_contains("device_no") ? (int)ho.at("device_no").as_int64() : 0;
-        bool clientHasData = ho.if_contains("has_data") && ho.at("has_data").as_bool();
+	std::string clientCode, clientDb;
+	bool clientEmpty;
+        {   auto hv = json::parse(co_await aReadLine(*stream, rbuf));
+	    auto& ha = hv.as_array();
+	    clientCode = std::string(ha[0].as_string());
+	    clientDb = std::string(ha[1].as_string());
+	    clientEmpty = ha.size() > 2 && ha[2].as_string() == "empty"sv;
+	}
         res.peerDb = clientDb;
 
-        if (clientCode != d.code) { co_await aWriteLine(*stream, R"({"error":"bad_code"})"); res.error = "bad_code"; co_return; }
+        if (clientCode != d.code) {
+	    co_await aWrite(*stream, R"(["error","bad_code"])" "\n"sv);
+	    res.error = "bad_code";
+	    co_return;
+	}
         if (clientDb != d.store.database()) {
-            json::object e; e["error"] = "db_mismatch"; e["db"] = d.store.database();
-            co_await aWriteLine(*stream, json::serialize(e)); res.error = "db_mismatch"; co_return;
-        }
-        if (clientDevNo == d.store.deviceNo() && !d.store.hasData() && clientHasData)
-            d.store.renumberSelf(std::max(d.store.maxDeviceNo(), clientDevNo) + 1);
-        int ackMaxDn = d.store.maxDeviceNo();
-        if (!d.store.knowsDevice(peer)) {
-            if (!confirm || !confirm(peer)) { co_await aWriteLine(*stream, R"({"error":"rejected"})"); res.error = "rejected"; co_return; }
-            d.store.reserveDeviceNo(peer, clientDevNo, "peer");
+            json::array e;
+	    e.emplace_back("error"sv);
+	    e.emplace_back("db_mismatch"sv);
+	    e.emplace_back(d.store.database());
+            co_await aWriteLine(*stream, json::serialize(e));
+	    res.error = "db_mismatch";
+	    co_return;
         }
 
-        json::object ok;
-        ok["ok"] = true; ok["db"] = d.store.database();
-        ok["device_no"] = d.store.deviceNo(); ok["pubkey"] = d.store.myPubkey();
-        ok["max_dn"] = ackMaxDn;
-        co_await aWriteLine(*stream, json::serialize(ok));
-
+	if(!d.store.hasData()) {
+	    if(clientEmpty) {
+		auto clientDeviceNo = d.store.addDevice(peer);
+		co_await aStreamFullFile(*stream, "device"sv,
+					 d.store.pDevice());
+		co_await aWrite(R"(["end"])" "\n"sv);
+		SyncIndex idx;
+		idx.device = Store::stateOf(d.store.pDevice());
+		d.store.saveSyncIndex(clientDeviceNo, idx);
+		res.ok = true; res.received = 0; res.sent = 0;
+	    }
+	    else {
+		co_await aWrite(*stream, "[\"empty\"]\n");
+		// TODO +++ recv device обязательно
+		// TODO +++ recv all
+		// TODO +++ recv "[\"end\"]\n"
+		// TODO +++
+		// TODO +++ write sync
+	    }
+	}
+	else if(clientEmpty) {
+	    auto clientDeviceNo = d.store.addDevice(peer);
+	    co_await aStreamFullFile(*stream, "device"sv,
+				     d.store.pDevice());
+	    // TODO +++ send all
+	    co_await aWrite(R"(["end"])" "\n"sv);
+	    SyncIndex idx;
+	    // TODO +++ idx.device = Store::stateOf(d.store.pDevice());
+	    // TODO +++
+	    d.store.saveSyncIndex(clientDeviceNo, idx);
+	    res.ok = true; res.received = 0;
+	    res.sent = -1; // TODO +++
+	}
+	else {
+	    // TODO +++ send all increment
+	    co_await aWrite(R"(["end"])" "\n"sv);
+	    // TODO +++ recv all increment
+	    // TODO +++ recv "[\"end\"]\n"
+	    // TODO +++
+	}
+#if 0
         // обмен манифестами справочников (состояние собеседника)
         co_await aWriteLine(*stream, manifestJson(d.store.listManifest()));
         ListManifest peerMan = manifestParse(co_await aReadLine(*stream, rbuf));
@@ -321,6 +381,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
         d.store.syncCommit(peerLocal);
         d.store.syncEnd();
         res.ok = true; res.received = ks; res.sent = kc;
+#endif
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
         d.store.syncEnd();
@@ -377,15 +438,16 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
         std::string peer = peerPubkey(*stream);
         res.peerPubkey = peer;
 
-        json::object hello;
-        hello["db"] = d.store.database();
-        hello["device_no"] = d.store.deviceNo();
-        hello["pubkey"] = d.store.myPubkey();
-        hello["code"] = info.code;
-        hello["has_data"] = d.store.hasData();
-        json::object helloMsg; helloMsg["hello"] = std::move(hello);
-        co_await aWriteLine(*stream, json::serialize(helloMsg));
+	bool storeEmpty = !d.store.hasData();
+        {   json::array hello;
+	    hello.emplace_back(info.code);
+	    hello.emplace_back(d.store.database());
+	    if(storeEmpty) hello.emplace_back("empty"sv);
+	    co_await aWriteLine(*stream, json::serialize(hello));
+	}
 
+	// TODO +++
+#if 0
         auto av = json::parse(co_await aReadLine(*stream, rbuf));
         auto& ao = av.as_object();
         if (auto* err = ao.if_contains("error")) {
@@ -419,6 +481,7 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
         d.store.syncCommit(peerLocal);
         d.store.syncEnd();
         res.ok = true; res.received = kc; res.sent = ks;
+#endif
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
         d.store.syncEnd();

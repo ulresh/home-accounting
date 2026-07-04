@@ -115,7 +115,7 @@ struct Schema {
 };
 
 // Манифест справочников (для обмена «состоянием» в начале сессии).
-struct ListManifest { // TODO +++ убрать ListManifest, поля переместить в SyncIndex
+struct ListManifest {
     FileState people, catalog, device;
 };
 struct MonthSyncData {
@@ -184,11 +184,12 @@ public:
     std::filesystem::path certPath() const;
     std::filesystem::path keyPath() const;
 
-    bool knowsDevice(const std::string& pubkey) const;
+    // bool knowsDevice(const std::string& pubkey) const;
     // TODO +++ int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
     bool hasData() const;
-    int  maxDeviceNo() const;
-    void renumberSelf(int newNo);
+    // int  maxDeviceNo() const;
+    // void renumberSelf(int newNo);
+    int addDevice(std::string_view pubkey);
 
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).
@@ -227,6 +228,7 @@ public:
     // TODO +++ std::string inEffectHeader(int yyyymm) const;
 
     std::filesystem::path root() const { return root_; }
+    std::filesystem::path pDevice() const { return dbDir()/"device.jsonl"; }
 
 private:
     std::filesystem::path dbDir() const { return root_ / db_; }
