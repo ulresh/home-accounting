@@ -14,6 +14,7 @@
 #include <vector>
 
 using namespace std::literals::string_view_literals;
+using namespace std::string_literals;
 namespace fs = std::filesystem;
 
 namespace ha {
@@ -68,7 +69,7 @@ static std::string toHex(const unsigned char* md, unsigned n) {
 
 // ---- файловые помощники (потоковые: файл целиком в память не грузим) ----
 // Размер и SHA1 файла, считая его блоками фиксированного размера.
-static FileState stateOf(const fs::path& p) {
+FileState Store::stateOf(const fs::path& p) {
     FileState st;
     std::ifstream in(p, std::ios::binary);
     if (!in.is_open()) return st;
@@ -603,10 +604,10 @@ void Store::ensureIdentity(bool forceSaveConfig) {
     saveConfig();
 }
 
-bool Store::knowsDevice(const std::string& pubkey) const {
+/*bool Store::knowsDevice(const std::string& pubkey) const {
     for (auto& d : devices_) if (d.pubkey == pubkey) return true;
     return false;
-}
+}*/
 /* TODO +++ int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name) {
     for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
     int maxNo = 0; bool taken = false;
@@ -623,11 +624,11 @@ bool Store::hasData() const {
     for (auto& d : devices_) if (d.pubkey != myPubkey_) return true;
     return false;
 }
-int Store::maxDeviceNo() const {
+/*int Store::maxDeviceNo() const {
     int m = 0;
     for (auto& d : devices_) m = std::max(m, d.no);
     return m;
-}
+}*/
 /*void Store::renumberSelf(int newNo) {
     for (auto& d : devices_) if (d.pubkey == myPubkey_) d.no = newNo;
     deviceNo_ = newNo;
@@ -639,10 +640,10 @@ int Store::addDevice(std::string_view pubkey) {
     int m = 0;
     for(auto& d : devices_) {
 	if(d.pubkey == pubkey)
-	    throw std::runtime_error("double public key"sv);
+	    throw std::runtime_error("double public key"s);
 	if(m < d.no) m = d.no;
     }
-    devices_.push_back(Device{++m, pubkey});
+    devices_.push_back(Device{++m, std::string(pubkey)});
     saveDevices();
     return m;
 }

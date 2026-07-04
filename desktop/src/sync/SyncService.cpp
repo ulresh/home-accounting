@@ -25,6 +25,8 @@
 #include <functional>
 #include <vector>
 
+using namespace std::literals::string_view_literals;
+using namespace std::string_literals;
 namespace asio = boost::asio;
 namespace ssl  = boost::asio::ssl;
 namespace json = boost::json;
@@ -309,7 +311,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
         res.peerDb = clientDb;
 
         if (clientCode != d.code) {
-	    co_await aWrite(*stream, R"(["error","bad_code"])" "\n"sv);
+	    co_await aWrite(*stream, R"(["error","bad_code"])" "\n"s);
 	    res.error = "bad_code";
 	    co_return;
 	}
@@ -328,14 +330,14 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 		auto clientDeviceNo = d.store.addDevice(peer);
 		co_await aStreamFullFile(*stream, "device"sv,
 					 d.store.pDevice());
-		co_await aWrite(R"(["end"])" "\n"sv);
+		co_await aWrite(*stream, R"(["end"])" "\n"s);
 		SyncIndex idx;
 		idx.device = Store::stateOf(d.store.pDevice());
 		d.store.saveSyncIndex(clientDeviceNo, idx);
 		res.ok = true; res.received = 0; res.sent = 0;
 	    }
 	    else {
-		co_await aWrite(*stream, "[\"empty\"]\n");
+		co_await aWrite(*stream, R"(["empty"])" "\n"s);
 		// TODO +++ recv device обязательно
 		// TODO +++ recv all
 		// TODO +++ recv "[\"end\"]\n"
@@ -348,7 +350,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    co_await aStreamFullFile(*stream, "device"sv,
 				     d.store.pDevice());
 	    // TODO +++ send all
-	    co_await aWrite(R"(["end"])" "\n"sv);
+	    co_await aWrite(*stream, R"(["end"])" "\n"s);
 	    SyncIndex idx;
 	    // TODO +++ idx.device = Store::stateOf(d.store.pDevice());
 	    // TODO +++
@@ -358,7 +360,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	}
 	else {
 	    // TODO +++ send all increment
-	    co_await aWrite(R"(["end"])" "\n"sv);
+	    co_await aWrite(*stream, R"(["end"])" "\n"s);
 	    // TODO +++ recv all increment
 	    // TODO +++ recv "[\"end\"]\n"
 	    // TODO +++

@@ -193,6 +193,7 @@ public:
 
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).
+    static FileState stateOf(const std::filesystem::path &p);
     ListManifest listManifest() const;
 
     // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
