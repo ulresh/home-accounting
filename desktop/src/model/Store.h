@@ -194,7 +194,7 @@ public:
     std::filesystem::path certPath() const;
     std::filesystem::path keyPath() const;
 
-    // bool knowsDevice(const std::string& pubkey) const;
+    int knowsDevice(const std::string &pubkey) const;
     // TODO +++ int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
     bool hasData() const;
     // int  maxDeviceNo() const;

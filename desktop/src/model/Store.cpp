@@ -608,10 +608,10 @@ void Store::ensureIdentity(bool forceSaveConfig) {
     saveConfig();
 }
 
-/*bool Store::knowsDevice(const std::string& pubkey) const {
-    for (auto& d : devices_) if (d.pubkey == pubkey) return true;
-    return false;
-}*/
+int Store::knowsDevice(const std::string& pubkey) const {
+    for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
+    return 0;
+}
 /* TODO +++ int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name) {
     for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
     int maxNo = 0; bool taken = false;
