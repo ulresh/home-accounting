@@ -94,7 +94,7 @@ FileState Store::stateOf(const fs::path& p) {
 }
 
 // ---- схемы ----
-static Schema canonicalSchema() {
+static Schema canonicalSchema() { // TODO +++ constexpr?
     return Schema{
         {"event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"},
         {"edit_datetime","rec_no","dev_no"}};
@@ -356,37 +356,15 @@ void Store::read_last_edit(const T &d) {
 void Store::loadEvents() {
     events_.clear(); canonicalSchemaMonths_.clear();
     lastEdit_.clear(); lastEditSeq_ = 0;
-    Schema can = canonicalSchema();
     for (auto& [yyyymm, path] : enumerateMonths()) {
-        Schema cur = can;
-	TempEvents monthEvents;
-        readValues(path, [&](const json::value& v){
-            if (v.is_object()) {
-                auto& o = v.as_object();
-                if (o.if_contains("header")) cur = schemaFromHeader(o);
-                else if (auto* del = o.if_contains("delete")) {
-                    RecRef t = parseRef(del->as_array(), cur.reference);
-		    applyDeleteFromLoad(monthEvents, t);
-		    if(auto *edit = o.if_contains("this"))
-			read_last_edit(parseRef(edit->as_array(),
-						cur.reference));
-                }
-            }
-            else if (v.is_array()) {
-		Event *ep;
-		monthEvents.emplace_back(ep = parseEventArray(
-				v.as_array(), cur));
-		read_last_edit(*ep);
-	    }
-        });
-	if(cur == can) canonicalSchemaMonths_.insert(yyyymm);
-	std::sort(monthEvents.begin(), monthEvents.end(),
-		  compareEvents);
-	for(auto &&p : monthEvents) events_.insert(events_.end(), p);
+	MonthEvents m(*this);
+        readValues(path, [&m](const json::value& v){ m.add(v); });
+	m.commit(yyyymm);
     }
 }
 
-void Store::applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r) {
+namespace {
+void applyDeleteFromLoad(Store::TempEvents monthEvents, const RecRef &r) {
     for(auto &&p : monthEvents)
 	if(p->compare_delete(r)) {
 	    // будет сортировка, поэтому порядок не важен
@@ -395,6 +373,37 @@ void Store::applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r) {
 	    monthEvents.resize(monthEvents.size() - 1);
 	    break;
 	}
+}
+}
+
+void MonthEvents::add(const json::value &v) {
+    if (v.is_object()) {
+	auto& o = v.as_object();
+	if (o.if_contains("header")) header = schemaFromHeader(o);
+	else if (!header) ;
+	else if (auto* del = o.if_contains("delete")) {
+	    RecRef t = parseRef(del->as_array(), header.reference);
+	    applyDeleteFromLoad(monthEvents, t);
+	    if(auto *edit = o.if_contains("this"))
+		store.read_last_edit(parseRef(edit->as_array(),
+					header.reference));
+	}
+    }
+    else if (!header) ;
+    else if (v.is_array()) {
+	Event *ep;
+	monthEvents.emplace_back(ep = parseEventArray(
+				v.as_array(), header));
+	store.read_last_edit(*ep);
+    }
+}
+
+void MonthEvents::commit(int yyyymm) {
+    if(header == canonicalSchema())
+	store.canonicalSchemaMonths_.insert(yyyymm);
+    std::sort(monthEvents.begin(), monthEvents.end(),
+	      compareEvents);
+    for(auto &&p : monthEvents) store.events_.insert(store.events_.end(), p);
 }
 
 std::string Store::categoryOf(const std::string& subject) const {

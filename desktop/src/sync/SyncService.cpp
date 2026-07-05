@@ -628,15 +628,21 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    d.store.listManifest(idx); // TODO +++ получать сразу из d.store.save*()
 	    while(cmd == "event"sv) {
 		int yyyymm = ao->at(1).as_uint64();
-		// TODO +++ open (create) file
-		// TODO +++
-		co_await aReadSizedJson(*stream, rbuf, ao->at(2).as_uint64(),
-			[yyyymm,&res](const json::value &v) -> void {
-			    // TODO +++
+		auto p = d.store.monthPath(yyyymm);
+		if(p.has_parent_path())
+		    fs::create_directories(p.parent_path());
+		MonthEvents m(d.store);
+		{   std::ofstream out(p, std::ios::binary);
+		    co_await aReadSizedJson(*stream, rbuf,
+					    ao->at(2).as_uint64(),
+			[&m,&out,&res](const json::value &v) -> void {
+			    out << json::serialize(v) << '\n';
+			    m.add(v);
 			    ++res.received;
 			});
-		// TODO +++
-		// TODO +++ idx.events[yyyymm] =
+		}
+		m.commit(yyyymm);
+		idx.events[yyyymm] = { fs::file_size(p), m.header };
 		av = json::parse(co_await aReadLine(*stream, rbuf));
 		ao = &av.as_array();
 		cmd = ao->at(0).as_string();

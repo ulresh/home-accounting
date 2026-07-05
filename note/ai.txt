@@ -550,6 +550,7 @@ TODO
 * SyncService - QSslSocket
 * SyncService - renumberSelf
 * SyncService - !d.store.knowsDevice
+* SyncService - client storeEmpty d.store.listManifest(idx); получать сразу из d.store.save*()
 --
 CLAUDE TASK
 END OF TASK

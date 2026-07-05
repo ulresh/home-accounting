@@ -115,6 +115,7 @@ struct Schema {
     Schema() = default;
     std::vector<std::string> columns;
     std::vector<std::string> reference;
+    operator bool() const { return !columns.empty() && !reference.empty(); }
     bool operator==(const Schema& o) const {
         return columns == o.columns && reference == o.reference;
     }
@@ -269,7 +270,6 @@ public:
     bool writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
-    void applyDeleteFromLoad(TempEvents monthEvents, const RecRef &r);
 
     std::filesystem::path root_;
     std::string db_ = "Основная";
@@ -315,6 +315,15 @@ public:
     std::unique_ptr<SyncSession> sync_;
     // TODO +++ void ensureDeleteKeysLoaded();
     void handleRecvValue(const json::value& v);
+};
+
+struct MonthEvents {
+    MonthEvents(Store &store) : store(store) {}
+    void add(const json::value &v);
+    void commit(int yyyymm);
+    Store &store;
+    Schema header;
+    Store::TempEvents monthEvents;
 };
 
 } // namespace ha
