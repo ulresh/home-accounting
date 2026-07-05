@@ -691,7 +691,8 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 		    idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
 			schemaFromHeader(a[2].as_object()) };
 		else idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
-						      std::move(header) };
+			// header здесь именно копируется, std::move нельзя
+						      header };
 	    }
 	}
     });

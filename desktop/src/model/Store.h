@@ -126,10 +126,10 @@ struct ListManifest {
     FileState people, catalog, device;
 };
 struct MonthSyncData {
-    MonthSyncData(uint64_t offset, Schema &&header)
+    /*MonthSyncData(uint64_t offset, Schema &&header)
 	: offset(offset), header(header)
     {}
-    MonthSyncData() = default;
+    MonthSyncData() = default;*/
     uint64_t offset;
     Schema header;
 };
