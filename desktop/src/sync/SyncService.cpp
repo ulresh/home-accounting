@@ -408,6 +408,7 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	store.saveSyncIndex(peerDeviceNo, idx);
     }
     else {
+	// TODO +++ idx.events[yyyymm] = +++ заголовки надо сохранить, мы можем по этим файлам ничего не записать в разделе Recv
 	for(auto &[yyyymm, path] : store.enumerateMonths()) {
 	    co_await aStreamFullEventFile(s, store, yyyymm, path);
 	    ++res.sent;
@@ -578,6 +579,12 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 		auto peerDeviceNo = d.store.addDevice(peer);
 		co_await aStreamFullFile(*stream, d.store, "device"sv);
 		co_await aWrite(*stream, R"(["end"])" "\n"s);
+		DCMD;
+		if(cmd != "done"sv) {
+		    res.error = "bad protocol"sv;
+		    co_return;
+		}
+		// TODO +++ recv ["done"]\n +++ добавить перед всеми saveSyncIndex - то есть сохранять состояние собеседника только после получения от него отмашки об успехе
 		SyncIndex idx;
 		idx.device = Store::stateOf(d.store.pDevice());
 		d.store.saveSyncIndex(peerDeviceNo, idx);
@@ -597,7 +604,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    if(!peerDeviceNo ||
 	       !fs::exists(d.store.syncIndexPath(peerDeviceNo)))
 		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
-					     false);
+					     false); // TODO +++
 	    else {
 		auto idx = d.store.loadSyncIndex(peerDeviceNo);
 		// TODO +++ send all increment
