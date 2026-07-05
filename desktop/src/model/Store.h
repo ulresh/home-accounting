@@ -173,6 +173,8 @@ public:
     void removePerson(const std::string& name);
     void upsertCatalog(const CatalogEntry& e);
     void replaceCatalog(const Catalog &list);
+    static void appendCatalog(Catalog &catalog_, const json::value &v);
+    void appendCatalog(const json::value &v) { appendCatalog(catalog_, v); }
 
     void categoryMembers(std::set<std::string> &result,
 			 Catalog::const_reference category) const;
@@ -231,7 +233,7 @@ public:
     std::filesystem::path root() const { return root_; }
     std::filesystem::path pDevice() const { return dbDir()/"device.jsonl"; }
 
-private:
+public:
     std::filesystem::path dbDir() const { return root_ / db_; }
     std::filesystem::path monthPath(int yyyymm) const;
     std::filesystem::path syncIndexPath(int peerDn) const;

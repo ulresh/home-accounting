@@ -280,14 +280,7 @@ void Store::switchDatabase(const std::string& name, bool create) {
 void Store::loadDevices() {
     devices_.clear();
     readValues(dbDir() / "device.jsonl", [&](const json::value& v){
-        try {
-            auto& a = v.as_array();
-            Device d;
-            d.no = (int)a[0].as_int64();
-            d.pubkey = std::string(a[1].as_string());
-            if (a.size() > 2 && a[2].is_string()) d.name = std::string(a[2].as_string());
-            devices_.push_back(std::move(d));
-        } catch (...) {}
+        try { devices_.push_back(Device(v)); } catch (...) {}
     });
 }
 
@@ -316,18 +309,20 @@ void Store::savePeople() {
     writeAtomic(dbDir() / "people.jsonl", content);
 }
 
+void Store::appendCatalog(Catalog &catalog_, const json::value &v) {
+    auto& a = v.as_array();
+    if (a.empty()) return;
+    auto p = catalog_.try_emplace(catalog_.end(),
+				  std::string(a[0].as_string()));
+    for (size_t i = 1; i < a.size(); ++i)
+	p->second.insert(p->second.end(),
+			 std::string(a[i].as_string()));
+}
+
 void Store::loadCatalog() {
     catalog_.clear();
-    readValues(dbDir() / "catalog.jsonl", [&](const json::value& v){
-        try {
-            auto& a = v.as_array();
-            if (a.empty()) return;
-	    auto p = catalog_.try_emplace(catalog_.end(),
-					  std::string(a[0].as_string()));
-            for (size_t i = 1; i < a.size(); ++i)
-		p->second.insert(p->second.end(),
-				 std::string(a[i].as_string()));
-        } catch (...) {}
+    readValues(dbDir() / "catalog.jsonl", [&](const json::value &v){
+        try { appendCatalog(v); } catch (...) {}
     });
 }
 void Store::saveCatalog() {
@@ -644,7 +639,11 @@ int Store::addDevice(std::string_view pubkey) {
 	if(m < d.no) m = d.no;
     }
     devices_.push_back(Device{++m, std::string(pubkey)});
-    saveDevices();
+    // saveDevices();
+    json::array a;
+    a.emplace_back(m);
+    a.emplace_back(pubkey);
+    appendLine(dbDir() / "device.jsonl", json::serialize(a)); // TODO +++ аналогично сделать addPeople
     return m;
 }
 

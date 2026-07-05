@@ -28,9 +28,17 @@ struct Event {
 
 // Устройство сети: [DN, "<публичный ключ>"].
 struct Device {
-    int         no = 0;        // DN — порядковый номер
-    std::string pubkey;        // полный публичный ключ (PEM SPKI, base64 одной строкой)
-    std::string name;          // отображаемое имя (DN из сертификата), необязательно
+    Device() {}
+    Device(const json::value& v) {
+	auto& a = v.as_array();
+	no = a[0].as_uint64();
+	pubkey = std::string(a[1].as_string());
+	if (a.size() > 2 && a[2].is_string())
+	    name = std::string(a[2].as_string());
+    }
+    int         no = 0; // DN — порядковый номер
+    std::string pubkey; // полный публичный ключ (PEM SPKI, base64 одной строкой)
+    std::string name;   // отмета this
 };
 
 // Строка каталога: первый элемент — категория, остальные — позиции.

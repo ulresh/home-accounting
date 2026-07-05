@@ -108,6 +108,7 @@ asio::awaitable<std::string> aReadLine(SslStream& s, std::string& rbuf) {
     co_return line;
 }
 
+/*
 // Прочитать ровно count байт, отдавая их блоками в sink сразу (без накопления).
 asio::awaitable<void> aReadToSink(SslStream& s, std::string& rbuf, std::size_t count,
                                   std::function<void(const char*, std::size_t)> sink) {
@@ -121,6 +122,60 @@ asio::awaitable<void> aReadToSink(SslStream& s, std::string& rbuf, std::size_t c
         std::size_t got = co_await s.async_read_some(asio::buffer(block, want), asio::use_awaitable);
         sink(block, got);
         count -= got;
+    }
+}
+*/
+
+asio::awaitable<void> aReadSizedJson(SslStream &s, std::string &rbuf,
+	std::size_t count, std::function<void(const json::value &v)> sink) {
+    json::stream_parser sp;
+    if(!rbuf.empty()) {
+	auto p = rbuf.data();
+	if(count < rbuf.size()) {
+	    auto consumed = sp.write_some(p, count);
+	    while(sp.done()) {
+		sink(sp.release());
+		sp.reset();
+		p += consumed; count -= consumed;
+		consumed = sp.write_some(p, count);
+	    }
+	    p += count;
+	    if(*p != '\n') throw std::runtime_error("bad protocol"s);
+	    rbuf.erase(0, count + 1);
+	    return;
+	}
+	else {
+	    auto size = rbuf.size();
+	    count -= size;
+	    auto consumed = sp.write_some(rbuf);
+	    while(sp.done()) {
+		sink(sp.release());
+		sp.reset();
+		p += consumed; size -= consumed;
+		consumed = sp.write_some(p, size);
+	    }
+	    rbuf.clear();
+	}
+    }
+    ++count; // \n после данных
+    char block[16384];
+    for(;;) {
+        std::size_t want = std::min(count, sizeof(block));
+        std::size_t got = co_await s.async_read_some(asio::buffer(block, want), asio::use_awaitable);
+        count -= got;
+	char *p = block;
+	auto consumed = sp.write_some(p, got);
+	while(sp.done()) {
+	    sink(sp.release());
+	    sp.reset();
+	    p += consumed; got -= consumed;
+	    consumed = sp.write_some(p, got);
+	}
+	if(!count) {
+	    if(block[got - 1] != '\n')
+		throw std::runtime_error("bad protocol"s);
+	    break;
+	}
     }
 }
 
@@ -339,6 +394,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    else {
 		co_await aWrite(*stream, R"(["empty"])" "\n"s);
 		// TODO +++ recv device обязательно
+		d.store.ensureIdentity();
 		// TODO +++ recv all
 		// TODO +++ recv "[\"end\"]\n"
 		// TODO +++
@@ -448,20 +504,75 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    co_await aWriteLine(*stream, json::serialize(hello));
 	}
 
-	// TODO +++
-#if 0
         auto av = json::parse(co_await aReadLine(*stream, rbuf));
-        auto& ao = av.as_object();
-        if (auto* err = ao.if_contains("error")) {
-            res.error = std::string(err->as_string());
-            if (auto* db = ao.if_contains("db")) res.peerDb = std::string(db->as_string());
+        auto *ao = &av.as_array();
+	std::string cmd(ao->[0].as_string());
+	if(fcmd == "error"sv) {
+            res.error = std::string(ao->[1].as_string());
+	    if(ao.size() > 2) res.peerDb = std::string(ao->[2].as_string());
             co_return;
-        }
-        res.peerDb = std::string(ao.at("db").as_string());
-        int serverDevNo = ao.if_contains("device_no") ? (int)ao.at("device_no").as_int64() : 0;
-        int serverMaxDn = ao.if_contains("max_dn") ? (int)ao.at("max_dn").as_int64() : serverDevNo;
-        if (serverDevNo == d.store.deviceNo() && !d.store.hasData())
-            d.store.renumberSelf(std::max(d.store.maxDeviceNo(), serverMaxDn) + 1);
+	}
+
+	if(storeEmpty) {
+	    if(cmd != "device"sv) {
+		res.error = "bad protocol"sv;
+		co_return;
+	    }
+	    decltype(d.store.devices_) newDevices;
+	    int newDeviceNo = 0;
+	    aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
+		[&newDevices, &newDeviceNo](const json::value &v) -> void {
+		    newDevices.push_back(Device(v));
+		    if(newDevices.back().pubkey == d.store.myPubkey_) {
+			if(newDeviceNo)
+			    throw std::runtime_error("bad protocol"s);
+			newDeviceNo = newDevices.back().no;
+		    }
+		});
+	    if(!newDeviceNo) {
+		res.error = "bad protocol"sv;
+		co_return;
+	    }
+	    d.store.devices_.swap(newDevices);
+	    d.store.deviceNo_ = newDeviceNo;
+	    d.store.saveDevices();
+	    d.store.saveConfig();
+	    av = json::parse(co_await aReadLine(*stream, rbuf));
+	    ao = &av.as_array();
+	    cmd = ao->[0].as_string();
+	    if(cmd == "people"sv) {
+		decltype(d.store.people_) newPeople;
+		aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
+			[&newPeople](const json::value &v) -> void {
+			    newPeople.insert(newPeople.end(), v.as_string());
+			});
+		d.store.people_.swap(newPeople);
+		d.store.savePeople();
+		av = json::parse(co_await aReadLine(*stream, rbuf));
+		ao = &av.as_array();
+		cmd = ao->[0].as_string();
+	    }
+	    if(cmd == "catalog"sv) {
+		decltype(d.store.catalog_) newCatalog;
+		aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
+			[&newCatalog](const json::value &v) -> void {
+			    d.store.appendCatalog(newCatalog, v);
+			});
+		d.store.catalog_.swap(newCatalog);
+		d.store.saveCatalog();
+		av = json::parse(co_await aReadLine(*stream, rbuf));
+		ao = &av.as_array();
+		cmd = ao->[0].as_string();
+	    }
+	    // TODO +++
+	}
+	else if(fcmd == "empty"sv) {
+	    // TODO +++
+	}
+	else {
+	    // TODO +++
+	}
+#if 0
         if (!d.store.knowsDevice(peer)) {
             if (!confirm || !confirm(peer)) { res.error = "rejected"; co_return; }
             d.store.reserveDeviceNo(peer, serverDevNo, "peer");
