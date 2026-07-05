@@ -142,7 +142,7 @@ asio::awaitable<void> aReadSizedJson(SslStream &s, std::string &rbuf,
 	    p += count;
 	    if(*p != '\n') throw std::runtime_error("bad protocol"s);
 	    rbuf.erase(0, count + 1);
-	    return;
+	    co_return;
 	}
 	else {
 	    auto size = rbuf.size();
@@ -505,11 +505,11 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	}
 
         auto av = json::parse(co_await aReadLine(*stream, rbuf));
-        auto *ao = &av.as_array();
-	std::string cmd(ao->[0].as_string());
-	if(fcmd == "error"sv) {
-            res.error = std::string(ao->[1].as_string());
-	    if(ao.size() > 2) res.peerDb = std::string(ao->[2].as_string());
+	json::array *ao = &av.as_array();
+	std::string cmd(ao->at(0).as_string());
+	if(cmd == "error"sv) {
+            res.error = std::string(ao->at(1).as_string());
+	    if(ao->size() > 2) res.peerDb = std::string(ao->at(2).as_string());
             co_return;
 	}
 
@@ -520,8 +520,9 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    }
 	    decltype(d.store.devices_) newDevices;
 	    int newDeviceNo = 0;
-	    aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
-		[&newDevices, &newDeviceNo](const json::value &v) -> void {
+	    co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
+		[&newDevices, &newDeviceNo, &d
+		 ](const json::value &v) -> void {
 		    newDevices.push_back(Device(v));
 		    if(newDevices.back().pubkey == d.store.myPubkey_) {
 			if(newDeviceNo)
@@ -539,34 +540,35 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    d.store.saveConfig();
 	    av = json::parse(co_await aReadLine(*stream, rbuf));
 	    ao = &av.as_array();
-	    cmd = ao->[0].as_string();
+	    cmd = ao->at(0).as_string();
 	    if(cmd == "people"sv) {
 		decltype(d.store.people_) newPeople;
-		aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
+		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
 			[&newPeople](const json::value &v) -> void {
-			    newPeople.insert(newPeople.end(), v.as_string());
+			    newPeople.insert(newPeople.end(),
+					     std::string(v.as_string()));
 			});
 		d.store.people_.swap(newPeople);
 		d.store.savePeople();
 		av = json::parse(co_await aReadLine(*stream, rbuf));
 		ao = &av.as_array();
-		cmd = ao->[0].as_string();
+		cmd = ao->at(0).as_string();
 	    }
 	    if(cmd == "catalog"sv) {
 		decltype(d.store.catalog_) newCatalog;
-		aReadSizedJson(*stream, rbuf, ao->[1].as_uint64(),
+		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
 			[&newCatalog](const json::value &v) -> void {
-			    d.store.appendCatalog(newCatalog, v);
+			    Store::appendCatalog(newCatalog, v);
 			});
 		d.store.catalog_.swap(newCatalog);
 		d.store.saveCatalog();
 		av = json::parse(co_await aReadLine(*stream, rbuf));
 		ao = &av.as_array();
-		cmd = ao->[0].as_string();
+		cmd = ao->at(0).as_string();
 	    }
 	    // TODO +++
 	}
-	else if(fcmd == "empty"sv) {
+	else if(cmd == "empty"sv) {
 	    // TODO +++
 	}
 	else {

@@ -3,6 +3,9 @@
 #include <set>
 #include <optional>
 #include <cstdint>
+#include <boost/json/value.hpp>
+
+namespace json = boost::json;
 
 namespace ha {
 
@@ -28,7 +31,9 @@ struct Event {
 
 // Устройство сети: [DN, "<публичный ключ>"].
 struct Device {
-    Device() {}
+    Device(int no, std::string_view pubkey, std::string_view name = {})
+	: no(no), pubkey(pubkey), name(name)
+    {}
     Device(const json::value& v) {
 	auto& a = v.as_array();
 	no = a[0].as_uint64();
