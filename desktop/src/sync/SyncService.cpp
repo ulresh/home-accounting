@@ -408,6 +408,99 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
     res.ok = true;
 }
 
+asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
+	const std::string &peer, SyncResult &res,
+	std::string &rbuf, json::array *ao, std::string cmd) {
+    if(cmd != "device"sv) {
+	res.error = "bad protocol"sv;
+	co_return;
+    }
+    decltype(store.devices_) newDevices;
+    int newDeviceNo = 0;
+    int peerDeviceNo = 0;
+    co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
+	[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &store, &res
+	 ](const json::value &v) -> void {
+	    newDevices.push_back(Device(v));
+	    if(newDevices.back().pubkey == store.myPubkey_) {
+		if(newDeviceNo)
+		    throw std::runtime_error("bad protocol"s);
+		newDeviceNo = newDevices.back().no;
+	    }
+	    else if(newDevices.back().pubkey == peer) {
+		if(peerDeviceNo)
+		    throw std::runtime_error("bad protocol"s);
+		peerDeviceNo = newDevices.back().no;
+	    }
+	    ++res.received;
+	});
+    if(!newDeviceNo || !peerDeviceNo) {
+	res.error = "bad protocol"sv;
+	co_return;
+    }
+    store.devices_.swap(newDevices);
+    store.deviceNo_ = newDeviceNo;
+    store.saveDevices();
+    store.saveConfig();
+    auto av = json::parse(co_await aReadLine(s, rbuf));
+    ao = &av.as_array();
+    cmd = ao->at(0).as_string();
+    if(cmd == "people"sv) {
+	decltype(store.people_) newPeople;
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
+		[&newPeople,&res](const json::value &v) -> void {
+		    newPeople.insert(newPeople.end(),
+				     std::string(v.as_string()));
+		    ++res.received;
+		});
+	store.people_.swap(newPeople);
+	store.savePeople();
+	av = json::parse(co_await aReadLine(s, rbuf));
+	ao = &av.as_array();
+	cmd = ao->at(0).as_string();
+    }
+    if(cmd == "catalog"sv) {
+	decltype(store.catalog_) newCatalog;
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
+		[&newCatalog,&res](const json::value &v) -> void {
+		    Store::appendCatalog(newCatalog, v);
+		    ++res.received;
+		});
+	store.catalog_.swap(newCatalog);
+	store.saveCatalog();
+	av = json::parse(co_await aReadLine(s, rbuf));
+	ao = &av.as_array();
+	cmd = ao->at(0).as_string();
+    }
+    SyncIndex idx;
+    store.listManifest(idx); // TODO +++ получать сразу из d.store.save*()
+    while(cmd == "event"sv) {
+	int yyyymm = ao->at(1).as_uint64();
+	auto p = store.monthPath(yyyymm);
+	if(p.has_parent_path()) fs::create_directories(p.parent_path());
+	MonthEvents m(store);
+	{   std::ofstream out(p, std::ios::binary);
+	    co_await aReadSizedJson(s, rbuf,
+				    ao->at(2).as_uint64(),
+		[&m,&out,&res](const json::value &v) -> void {
+		    out << json::serialize(v) << '\n';
+		    m.add(v);
+		    ++res.received;
+		});
+	}
+	m.commit(yyyymm);
+	idx.events[yyyymm] = { fs::file_size(p), m.header };
+	av = json::parse(co_await aReadLine(s, rbuf));
+	ao = &av.as_array();
+	cmd = ao->at(0).as_string();
+    }
+    if(cmd == "end"sv) {
+	store.saveSyncIndex(peerDeviceNo, idx);
+	res.ok = true;
+    }
+    else res.error = "bad protocol"sv;
+}
+
 asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
     std::string rbuf;
     try {
@@ -456,12 +549,11 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    }
 	    else {
 		co_await aWrite(*stream, R"(["empty"])" "\n"s);
-		// TODO +++ recv device обязательно
-		d.store.ensureIdentity();
-		// TODO +++ recv all
-		// TODO +++ recv "[\"end\"]\n"
-		// TODO +++
-		// TODO +++ write sync
+		auto av = json::parse(co_await aReadLine(*stream, rbuf));
+		json::array *ao = &av.as_array();
+		std::string cmd(ao->at(0).as_string());
+		co_await aRecvAllWhenEmpty(*stream, d.store, peer, res,
+					   rbuf, ao, cmd);
 	    }
 	}
 	else if(clientEmpty)
@@ -565,97 +657,9 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
             co_return;
 	}
 
-	if(storeEmpty) {
-	    if(cmd != "device"sv) {
-		res.error = "bad protocol"sv;
-		co_return;
-	    }
-	    decltype(d.store.devices_) newDevices;
-	    int newDeviceNo = 0;
-	    int peerDeviceNo = 0;
-	    co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-		[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &d, &res
-		 ](const json::value &v) -> void {
-		    newDevices.push_back(Device(v));
-		    if(newDevices.back().pubkey == d.store.myPubkey_) {
-			if(newDeviceNo)
-			    throw std::runtime_error("bad protocol"s);
-			newDeviceNo = newDevices.back().no;
-		    }
-		    else if(newDevices.back().pubkey == peer) {
-			if(peerDeviceNo)
-			    throw std::runtime_error("bad protocol"s);
-			peerDeviceNo = newDevices.back().no;
-		    }
-		    ++res.received;
-		});
-	    if(!newDeviceNo || !peerDeviceNo) {
-		res.error = "bad protocol"sv;
-		co_return;
-	    }
-	    d.store.devices_.swap(newDevices);
-	    d.store.deviceNo_ = newDeviceNo;
-	    d.store.saveDevices();
-	    d.store.saveConfig();
-	    av = json::parse(co_await aReadLine(*stream, rbuf));
-	    ao = &av.as_array();
-	    cmd = ao->at(0).as_string();
-	    if(cmd == "people"sv) {
-		decltype(d.store.people_) newPeople;
-		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-			[&newPeople,&res](const json::value &v) -> void {
-			    newPeople.insert(newPeople.end(),
-					     std::string(v.as_string()));
-			    ++res.received;
-			});
-		d.store.people_.swap(newPeople);
-		d.store.savePeople();
-		av = json::parse(co_await aReadLine(*stream, rbuf));
-		ao = &av.as_array();
-		cmd = ao->at(0).as_string();
-	    }
-	    if(cmd == "catalog"sv) {
-		decltype(d.store.catalog_) newCatalog;
-		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-			[&newCatalog,&res](const json::value &v) -> void {
-			    Store::appendCatalog(newCatalog, v);
-			    ++res.received;
-			});
-		d.store.catalog_.swap(newCatalog);
-		d.store.saveCatalog();
-		av = json::parse(co_await aReadLine(*stream, rbuf));
-		ao = &av.as_array();
-		cmd = ao->at(0).as_string();
-	    }
-	    SyncIndex idx;
-	    d.store.listManifest(idx); // TODO +++ получать сразу из d.store.save*()
-	    while(cmd == "event"sv) {
-		int yyyymm = ao->at(1).as_uint64();
-		auto p = d.store.monthPath(yyyymm);
-		if(p.has_parent_path())
-		    fs::create_directories(p.parent_path());
-		MonthEvents m(d.store);
-		{   std::ofstream out(p, std::ios::binary);
-		    co_await aReadSizedJson(*stream, rbuf,
-					    ao->at(2).as_uint64(),
-			[&m,&out,&res](const json::value &v) -> void {
-			    out << json::serialize(v) << '\n';
-			    m.add(v);
-			    ++res.received;
-			});
-		}
-		m.commit(yyyymm);
-		idx.events[yyyymm] = { fs::file_size(p), m.header };
-		av = json::parse(co_await aReadLine(*stream, rbuf));
-		ao = &av.as_array();
-		cmd = ao->at(0).as_string();
-	    }
-	    if(cmd == "end"sv) {
-		d.store.saveSyncIndex(peerDeviceNo, idx);
-		res.ok = true;
-	    }
-	    else res.error = "bad protocol"sv;
-	}
+	if(storeEmpty)
+	    co_await aRecvAllWhenEmpty(*stream, d.store, peer, res,
+				       rbuf, ao, cmd);
 	else if(cmd == "empty"sv)
 	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
 	else {
