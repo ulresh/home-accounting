@@ -569,18 +569,24 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    }
 	    decltype(d.store.devices_) newDevices;
 	    int newDeviceNo = 0;
+	    int serverDeviceNo = 0;
 	    co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-		[&newDevices, &newDeviceNo, &d, &res
+		[&newDevices, &newDeviceNo, &peer, &serverDeviceNo, &d, &res
 		 ](const json::value &v) -> void {
 		    newDevices.push_back(Device(v));
 		    if(newDevices.back().pubkey == d.store.myPubkey_) {
 			if(newDeviceNo)
 			    throw std::runtime_error("bad protocol"s);
 			newDeviceNo = newDevices.back().no;
-			++res.received;
 		    }
+		    else if(newDevices.back().pubkey == peer) {
+			if(serverDeviceNo)
+			    throw std::runtime_error("bad protocol"s);
+			serverDeviceNo = newDevices.back().no;
+		    }
+		    ++res.received;
 		});
-	    if(!newDeviceNo) {
+	    if(!newDeviceNo || !serverDeviceNo) {
 		res.error = "bad protocol"sv;
 		co_return;
 	    }
@@ -618,19 +624,27 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 		ao = &av.as_array();
 		cmd = ao->at(0).as_string();
 	    }
+	    SyncIndex idx;
+	    d.store.listManifest(idx); // TODO +++ получать сразу из d.store.save*()
 	    while(cmd == "event"sv) {
+		int yyyymm = ao->at(1).as_uint64();
+		// TODO +++ open (create) file
 		// TODO +++
 		co_await aReadSizedJson(*stream, rbuf, ao->at(2).as_uint64(),
-			[&res](const json::value &v) -> void {
+			[yyyymm,&res](const json::value &v) -> void {
 			    // TODO +++
 			    ++res.received;
 			});
 		// TODO +++
+		// TODO +++ idx.events[yyyymm] =
 		av = json::parse(co_await aReadLine(*stream, rbuf));
 		ao = &av.as_array();
 		cmd = ao->at(0).as_string();
 	    }
-	    if(cmd == "end"sv) res.ok = true;
+	    if(cmd == "end"sv) {
+		d.store.saveSyncIndex(serverDeviceNo, idx);
+		res.ok = true;
+	    }
 	    else res.error = "bad protocol"sv;
 	}
 	else if(cmd == "empty"sv) {
