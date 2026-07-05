@@ -187,8 +187,10 @@ asio::awaitable<void> aWriteLine(SslStream& s, std::string line) {
     co_await asio::async_write(s, asio::buffer(line), asio::use_awaitable);
 }
 
-asio::awaitable<void> aStreamFullFile(SslStream& s, std::string_view name,
-				      fs::path path) {
+asio::awaitable<void> aStreamFullFile(SslStream &s,
+				      const Store &store,
+				      std::string_view name) {
+    auto path = store.dbDir() / (std::string(name) + ".jsonl"s);
     {   json::array h;
 	h.emplace_back(name);
 	h.emplace_back((uint64_t)fs::file_size(path));
@@ -383,8 +385,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	if(!d.store.hasData()) {
 	    if(clientEmpty) {
 		auto clientDeviceNo = d.store.addDevice(peer);
-		co_await aStreamFullFile(*stream, "device"sv,
-					 d.store.pDevice());
+		co_await aStreamFullFile(*stream, d.store, "device"sv);
 		co_await aWrite(*stream, R"(["end"])" "\n"s);
 		SyncIndex idx;
 		idx.device = Store::stateOf(d.store.pDevice());
@@ -403,8 +404,11 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	}
 	else if(clientEmpty) {
 	    auto clientDeviceNo = d.store.addDevice(peer);
-	    co_await aStreamFullFile(*stream, "device"sv,
-				     d.store.pDevice());
+	    co_await aStreamFullFile(*stream, d.store, "device"sv);
+	    if(!d.store.people_.empty())
+		co_await aStreamFullFile(*stream, d.store, "people"sv);
+	    if(!d.store.catalog_.empty())
+		co_await aStreamFullFile(*stream, d.store, "catalog"sv);
 	    // TODO +++ send all
 	    co_await aWrite(*stream, R"(["end"])" "\n"s);
 	    SyncIndex idx;
