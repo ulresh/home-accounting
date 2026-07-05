@@ -10,6 +10,7 @@
 #include <boost/json.hpp>
 
 namespace json = boost::json;
+namespace fs = std::filesystem;
 
 namespace ha {
 
@@ -106,6 +107,12 @@ struct FileState {
 // мы храним строки так, как получили (только с DN map), поэтому в одном файле
 // могут оказаться строки с разными схемами; перед каждой схемой идёт header.
 struct Schema {
+    Schema(std::vector<std::string> &&columns,
+	   std::vector<std::string> &&reference)
+	: columns(columns), reference(reference)
+    {}
+    Schema(const json::object &o);
+    Schema() = default;
     std::vector<std::string> columns;
     std::vector<std::string> reference;
     bool operator==(const Schema& o) const {
@@ -119,6 +126,10 @@ struct ListManifest {
     FileState people, catalog, device;
 };
 struct MonthSyncData {
+    MonthSyncData(uint64_t offset, Schema &&header)
+	: offset(offset), header(header)
+    {}
+    MonthSyncData() = default;
     uint64_t offset;
     Schema header;
 };
@@ -196,7 +207,7 @@ public:
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).
     static FileState stateOf(const std::filesystem::path &p);
-    ListManifest listManifest() const;
+    void listManifest(ListManifest &m) const;
 
     // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
@@ -237,6 +248,7 @@ public:
     std::filesystem::path dbDir() const { return root_ / db_; }
     std::filesystem::path monthPath(int yyyymm) const;
     std::filesystem::path syncIndexPath(int peerDn) const;
+    std::vector<std::pair<int,fs::path>> enumerateMonths() const;
 
     void loadConfig();
     void saveConfig();

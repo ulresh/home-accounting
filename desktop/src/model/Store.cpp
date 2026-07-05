@@ -15,7 +15,6 @@
 
 using namespace std::literals::string_view_literals;
 using namespace std::string_literals;
-namespace fs = std::filesystem;
 
 namespace ha {
 
@@ -115,16 +114,19 @@ inline std::string headerLineFor(const Schema& s) {
 inline std::string canonicalHeaderLine() {
     return headerLineFor(canonicalSchema());
 }
-static Schema schemaFromHeader(const json::object& o) {
-    Schema s;
+Schema::Schema(const json::object &o) {
     if (auto* h = o.if_contains("header"))
-        for (auto& c : h->as_array()) if (c.is_string()) s.columns.push_back(std::string(c.as_string()));
+        for (auto& c : h->as_array())
+	    if (c.is_string())
+		columns.push_back(std::string(c.as_string()));
     if (auto* r = o.if_contains("reference"))
-        for (auto& c : r->as_array()) if (c.is_string()) s.reference.push_back(std::string(c.as_string()));
-    if (s.columns.empty())   s.columns = canonicalSchema().columns;
-    if (s.reference.empty()) s.reference = canonicalSchema().reference;
-    return s;
+        for (auto& c : r->as_array())
+	    if (c.is_string())
+		reference.push_back(std::string(c.as_string()));
+    if (columns.empty())   columns = canonicalSchema().columns;
+    if (reference.empty()) reference = canonicalSchema().reference;
 }
+static Schema schemaFromHeader(const json::object& o) { return Schema(o); }
 
 static Event *parseEventArray(const json::array& a, const Schema& s) {
     Event* ep;
@@ -193,8 +195,9 @@ fs::path Store::syncIndexPath(int peerDn) const {
 }
 
 // перечислить все месячные файлы базы (yyyymm, путь), по возрастанию.
-static std::vector<std::pair<int,fs::path>> enumerateMonths(const fs::path& dbDir) {
+std::vector<std::pair<int,fs::path>> Store::enumerateMonths() const {
     std::vector<std::pair<int,fs::path>> out;
+    auto dbDir = this->dbDir();
     if (!fs::exists(dbDir)) return out;
     for (auto& decade : fs::directory_iterator(dbDir)) {
         if (!decade.is_directory()) continue;
@@ -354,7 +357,7 @@ void Store::loadEvents() {
     events_.clear(); canonicalSchemaMonths_.clear();
     lastEdit_.clear(); lastEditSeq_ = 0;
     Schema can = canonicalSchema();
-    for (auto& [yyyymm, path] : enumerateMonths(dbDir())) {
+    for (auto& [yyyymm, path] : enumerateMonths()) {
         Schema cur = can;
 	TempEvents monthEvents;
         readValues(path, [&](const json::value& v){
@@ -651,12 +654,10 @@ int Store::addDevice(std::string_view pubkey) {
 //                      Инкрементная синхронизация
 // =====================================================================
 
-ListManifest Store::listManifest() const {
-    ListManifest m;
+void Store::listManifest(ListManifest &m) const {
     m.people  = stateOf(dbDir() / "people.jsonl");
     m.catalog = stateOf(dbDir() / "catalog.jsonl");
     m.device  = stateOf(dbDir() / "device.jsonl");
-    return m;
 }
 
 // Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего
@@ -690,7 +691,7 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 		    idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
 			schemaFromHeader(a[2].as_object()) };
 		else idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
-						      header };
+						      std::move(header) };
 	    }
 	}
     });
@@ -952,7 +953,7 @@ void Store::syncCommit(int peerDn) {
     // Состояние собеседника: после успешного обмена у него есть все наши месячные
     // файлы целиком — фиксируем их текущие размеры как его offset.
     std::map<int, long long> off;
-    for (auto& [yyyymm, path] : enumerateMonths(dbDir()))
+    for (auto& [yyyymm, path] : enumerateMonths())
         off[yyyymm] = (long long)fs::file_size(path);
     saveSyncIndex(peerDn, off);
 }

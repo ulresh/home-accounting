@@ -208,6 +208,43 @@ asio::awaitable<void> aStreamFullFile(SslStream &s,
     co_await aWrite(s, "\n");
 }
 
+asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
+	const Store &store, int yyyymm, const fs::path &path) {
+    auto size = fs::file_size(path);
+    {   json::array h;
+	h.emplace_back("event"sv);
+	h.emplace_back(yyyymm);
+	h.emplace_back((uint64_t)size);
+	co_await aWriteLine(s, json::serialize(h));
+    }
+    std::ifstream in(path, std::ios::binary);
+    char block[16384];
+    json::stream_parser sp;
+    Schema header;
+    while (in) {
+        in.read(block, sizeof(block));
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+	char *p = block;
+	auto si = got;
+	for(;;) {
+	    auto consumed = sp.write_some(p, si);
+	    if(!sp.done()) break;
+	    auto v = sp.release();
+            if(v.is_object()) {
+                auto &o = v.as_object();
+                if(o.if_contains("header")) header = Schema(o);
+	    }
+	    sp.reset();
+	    p += consumed; si -= consumed;
+	}
+        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got),
+				   asio::use_awaitable);
+    }
+    co_await aWrite(s, "\n"s);
+    co_return MonthSyncData{size, std::move(header)};
+}
+
 /*
 // Прочитать файл [from, from+len) блоками и сразу слать в сеть (без накопления).
 asio::awaitable<void> aStreamFile(SslStream& s, fs::path path, long long from, long long len) {
@@ -405,18 +442,26 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	else if(clientEmpty) {
 	    auto clientDeviceNo = d.store.addDevice(peer);
 	    co_await aStreamFullFile(*stream, d.store, "device"sv);
-	    if(!d.store.people_.empty())
+	    ++res.sent;
+	    if(!d.store.people_.empty()) {
 		co_await aStreamFullFile(*stream, d.store, "people"sv);
-	    if(!d.store.catalog_.empty())
+		++res.sent;
+	    }
+	    if(!d.store.catalog_.empty()) {
 		co_await aStreamFullFile(*stream, d.store, "catalog"sv);
-	    // TODO +++ send all
-	    co_await aWrite(*stream, R"(["end"])" "\n"s);
+		++res.sent;
+	    }
 	    SyncIndex idx;
-	    // TODO +++ idx.device = Store::stateOf(d.store.pDevice());
-	    // TODO +++
+	    d.store.listManifest(idx);
+	    for(auto &[yyyymm, path] : d.store.enumerateMonths()) {
+		idx.events[yyyymm] =
+		    co_await aStreamFullEventFile(*stream, d.store,
+						  yyyymm, path);
+		++res.sent;
+	    }
+	    co_await aWrite(*stream, R"(["end"])" "\n"s);
 	    d.store.saveSyncIndex(clientDeviceNo, idx);
-	    res.ok = true; res.received = 0;
-	    res.sent = -1; // TODO +++
+	    res.ok = true;
 	}
 	else {
 	    // TODO +++ send all increment
@@ -525,13 +570,14 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    decltype(d.store.devices_) newDevices;
 	    int newDeviceNo = 0;
 	    co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-		[&newDevices, &newDeviceNo, &d
+		[&newDevices, &newDeviceNo, &d, &res
 		 ](const json::value &v) -> void {
 		    newDevices.push_back(Device(v));
 		    if(newDevices.back().pubkey == d.store.myPubkey_) {
 			if(newDeviceNo)
 			    throw std::runtime_error("bad protocol"s);
 			newDeviceNo = newDevices.back().no;
+			++res.received;
 		    }
 		});
 	    if(!newDeviceNo) {
@@ -548,9 +594,10 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    if(cmd == "people"sv) {
 		decltype(d.store.people_) newPeople;
 		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-			[&newPeople](const json::value &v) -> void {
+			[&newPeople,&res](const json::value &v) -> void {
 			    newPeople.insert(newPeople.end(),
 					     std::string(v.as_string()));
+			    ++res.received;
 			});
 		d.store.people_.swap(newPeople);
 		d.store.savePeople();
@@ -561,8 +608,9 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    if(cmd == "catalog"sv) {
 		decltype(d.store.catalog_) newCatalog;
 		co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-			[&newCatalog](const json::value &v) -> void {
+			[&newCatalog,&res](const json::value &v) -> void {
 			    Store::appendCatalog(newCatalog, v);
+			    ++res.received;
 			});
 		d.store.catalog_.swap(newCatalog);
 		d.store.saveCatalog();
@@ -570,7 +618,20 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 		ao = &av.as_array();
 		cmd = ao->at(0).as_string();
 	    }
-	    // TODO +++
+	    while(cmd == "event"sv) {
+		// TODO +++
+		co_await aReadSizedJson(*stream, rbuf, ao->at(2).as_uint64(),
+			[&res](const json::value &v) -> void {
+			    // TODO +++
+			    ++res.received;
+			});
+		// TODO +++
+		av = json::parse(co_await aReadLine(*stream, rbuf));
+		ao = &av.as_array();
+		cmd = ao->at(0).as_string();
+	    }
+	    if(cmd == "end"sv) res.ok = true;
+	    else res.error = "bad protocol"sv;
 	}
 	else if(cmd == "empty"sv) {
 	    // TODO +++
