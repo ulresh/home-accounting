@@ -1,6 +1,5 @@
 #pragma once
 #include "Types.h"
-#include <filesystem>
 #include <map>
 #include <set>
 #include <string>
@@ -8,9 +7,6 @@
 #include <optional>
 #include <memory>
 #include <boost/json.hpp>
-
-namespace json = boost::json;
-namespace fs = std::filesystem;
 
 namespace ha {
 
@@ -243,7 +239,7 @@ public:
     // TODO +++ std::string inEffectHeader(int yyyymm) const;
 
     std::filesystem::path root() const { return root_; }
-    std::filesystem::path pDevice() const { return dbDir()/"device.jsonl"; }
+    std::filesystem::path pDevice() const { return dbDir()/"device.jsonl"s; }
 
 public:
     std::filesystem::path dbDir() const { return root_ / db_; }

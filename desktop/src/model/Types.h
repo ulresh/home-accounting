@@ -3,9 +3,7 @@
 #include <set>
 #include <optional>
 #include <cstdint>
-#include <boost/json/value.hpp>
-
-namespace json = boost::json;
+#include "../shorts.h"
 
 namespace ha {
 

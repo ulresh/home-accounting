@@ -13,9 +13,6 @@
 #include <iterator>
 #include <vector>
 
-using namespace std::literals::string_view_literals;
-using namespace std::string_literals;
-
 namespace ha {
 
 // JSON-значение из std::string (избегаем двойной пользовательской конверсии).
@@ -282,7 +279,7 @@ void Store::switchDatabase(const std::string& name, bool create) {
 
 void Store::loadDevices() {
     devices_.clear();
-    readValues(dbDir() / "device.jsonl", [&](const json::value& v){
+    readValues(pDevice(), [&](const json::value& v){
         try { devices_.push_back(Device(v)); } catch (...) {}
     });
 }
@@ -296,7 +293,7 @@ void Store::saveDevices() {
         if (!d.name.empty()) a.emplace_back(d.name);
         content += json::serialize(a) + "\n";
     }
-    writeAtomic(dbDir() / "device.jsonl", content);
+    writeAtomic(pDevice(), content);
 }
 
 void Store::loadPeople() {
@@ -646,8 +643,8 @@ bool Store::hasData() const {
 int Store::addDevice(std::string_view pubkey) {
     int m = 0;
     for(auto& d : devices_) {
-	if(d.pubkey == pubkey)
-	    throw std::runtime_error("double public key"s);
+	// могла быть незавершённая синхронизация, при которой мы добавили собеседника, но собеседник у себя синхронизацию не записал
+	if(d.pubkey == pubkey) return d.no;
 	if(m < d.no) m = d.no;
     }
     devices_.push_back(Device{++m, std::string(pubkey)});
@@ -655,7 +652,7 @@ int Store::addDevice(std::string_view pubkey) {
     json::array a;
     a.emplace_back(m);
     a.emplace_back(pubkey);
-    appendLine(dbDir() / "device.jsonl", json::serialize(a)); // TODO +++ аналогично сделать addPeople
+    appendLine(pDevice(), json::serialize(a)); // TODO +++ аналогично сделать addPeople
     return m;
 }
 
@@ -666,7 +663,7 @@ int Store::addDevice(std::string_view pubkey) {
 void Store::listManifest(ListManifest &m) const {
     m.people  = stateOf(dbDir() / "people.jsonl");
     m.catalog = stateOf(dbDir() / "catalog.jsonl");
-    m.device  = stateOf(dbDir() / "device.jsonl");
+    m.device  = stateOf(pDevice());
 }
 
 // Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего
@@ -765,8 +762,8 @@ void Store::syncEnd() { sync_.reset(); }
 /* TODO +++ std::vector<SyncSendItem> Store::syncPlanOutgoing(const ListManifest& peer) const {
     std::vector<SyncSendItem> out;
     // device-data — всегда (получателю нужен наш список устройств для DN-map).
-    out.push_back(SyncSendItem{"device-data", 0, 0, "", dbDir() / "device.jsonl", 0,
-                               stateOf(dbDir() / "device.jsonl").size});
+    out.push_back(SyncSendItem{"device-data", 0, 0, "", pDevice(), 0,
+                               stateOf(pDevice()).size});
     {
         FileState me = stateOf(dbDir() / "people.jsonl");
         if (me.size != peer.people.size || me.sha1 != peer.people.sha1)

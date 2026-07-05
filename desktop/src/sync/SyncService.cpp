@@ -383,6 +383,31 @@ void SyncServer::cancel() {
 }
 
 namespace {
+asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
+			const std::string &peer, SyncResult &res) {
+    auto peerDeviceNo = store.addDevice(peer);
+    co_await aStreamFullFile(s, store, "device"sv);
+    ++res.sent;
+    if(!store.people_.empty()) {
+	co_await aStreamFullFile(s, store, "people"sv);
+	++res.sent;
+    }
+    if(!store.catalog_.empty()) {
+	co_await aStreamFullFile(s, store, "catalog"sv);
+	++res.sent;
+    }
+    SyncIndex idx;
+    store.listManifest(idx);
+    for(auto &[yyyymm, path] : store.enumerateMonths()) {
+	idx.events[yyyymm] =
+	    co_await aStreamFullEventFile(s, store, yyyymm, path);
+	++res.sent;
+    }
+    co_await aWrite(s, R"(["end"])" "\n"s);
+    store.saveSyncIndex(peerDeviceNo, idx);
+    res.ok = true;
+}
+
 asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
     std::string rbuf;
     try {
@@ -421,12 +446,12 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 
 	if(!d.store.hasData()) {
 	    if(clientEmpty) {
-		auto clientDeviceNo = d.store.addDevice(peer);
+		auto peerDeviceNo = d.store.addDevice(peer);
 		co_await aStreamFullFile(*stream, d.store, "device"sv);
 		co_await aWrite(*stream, R"(["end"])" "\n"s);
 		SyncIndex idx;
 		idx.device = Store::stateOf(d.store.pDevice());
-		d.store.saveSyncIndex(clientDeviceNo, idx);
+		d.store.saveSyncIndex(peerDeviceNo, idx);
 		res.ok = true; res.received = 0; res.sent = 0;
 	    }
 	    else {
@@ -439,30 +464,8 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 		// TODO +++ write sync
 	    }
 	}
-	else if(clientEmpty) {
-	    auto clientDeviceNo = d.store.addDevice(peer);
-	    co_await aStreamFullFile(*stream, d.store, "device"sv);
-	    ++res.sent;
-	    if(!d.store.people_.empty()) {
-		co_await aStreamFullFile(*stream, d.store, "people"sv);
-		++res.sent;
-	    }
-	    if(!d.store.catalog_.empty()) {
-		co_await aStreamFullFile(*stream, d.store, "catalog"sv);
-		++res.sent;
-	    }
-	    SyncIndex idx;
-	    d.store.listManifest(idx);
-	    for(auto &[yyyymm, path] : d.store.enumerateMonths()) {
-		idx.events[yyyymm] =
-		    co_await aStreamFullEventFile(*stream, d.store,
-						  yyyymm, path);
-		++res.sent;
-	    }
-	    co_await aWrite(*stream, R"(["end"])" "\n"s);
-	    d.store.saveSyncIndex(clientDeviceNo, idx);
-	    res.ok = true;
-	}
+	else if(clientEmpty)
+	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
 	else {
 	    // TODO +++ send all increment
 	    co_await aWrite(*stream, R"(["end"])" "\n"s);
@@ -569,9 +572,9 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    }
 	    decltype(d.store.devices_) newDevices;
 	    int newDeviceNo = 0;
-	    int serverDeviceNo = 0;
+	    int peerDeviceNo = 0;
 	    co_await aReadSizedJson(*stream, rbuf, ao->at(1).as_uint64(),
-		[&newDevices, &newDeviceNo, &peer, &serverDeviceNo, &d, &res
+		[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &d, &res
 		 ](const json::value &v) -> void {
 		    newDevices.push_back(Device(v));
 		    if(newDevices.back().pubkey == d.store.myPubkey_) {
@@ -580,13 +583,13 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 			newDeviceNo = newDevices.back().no;
 		    }
 		    else if(newDevices.back().pubkey == peer) {
-			if(serverDeviceNo)
+			if(peerDeviceNo)
 			    throw std::runtime_error("bad protocol"s);
-			serverDeviceNo = newDevices.back().no;
+			peerDeviceNo = newDevices.back().no;
 		    }
 		    ++res.received;
 		});
-	    if(!newDeviceNo || !serverDeviceNo) {
+	    if(!newDeviceNo || !peerDeviceNo) {
 		res.error = "bad protocol"sv;
 		co_return;
 	    }
@@ -648,14 +651,13 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 		cmd = ao->at(0).as_string();
 	    }
 	    if(cmd == "end"sv) {
-		d.store.saveSyncIndex(serverDeviceNo, idx);
+		d.store.saveSyncIndex(peerDeviceNo, idx);
 		res.ok = true;
 	    }
 	    else res.error = "bad protocol"sv;
 	}
-	else if(cmd == "empty"sv) {
-	    // TODO +++
-	}
+	else if(cmd == "empty"sv)
+	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
 	else {
 	    // TODO +++
 	}
