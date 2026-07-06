@@ -107,7 +107,7 @@ struct Schema {
 	   std::vector<std::string> &&reference)
 	: columns(columns), reference(reference)
     {}
-    Schema(const json::object &o);
+    Schema(const json::object &o, bool add_defaults = true);
     Schema() = default;
     std::vector<std::string> columns;
     std::vector<std::string> reference;
@@ -131,6 +131,7 @@ struct MonthSyncData {
     Schema header;
 };
 struct SyncIndex : ListManifest {
+    bool empty = true;
     std::map<int, int> dnMap; // DN партнёра -> наш DN
     std::map<int, MonthSyncData> events;
 };
@@ -208,7 +209,7 @@ public:
 
     // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
-    SyncIndex loadSyncIndex(int peerDn) const;
+    void loadSyncIndex(int peerDn, SyncIndex &idx) const;
     void saveSyncIndex(int peerDn, const SyncIndex &idx) const;
 
     // Начать/закончить сессию синхронизации с партнёром (peerDn — его номер у нас).
@@ -299,8 +300,9 @@ public:
     struct SyncSession {
 	SyncSession(const Store &s, int peerDn)
 	    : peerDn(peerDn)
-	    , index(s.loadSyncIndex(peerDn))
-	{}
+	{
+	    s.loadSyncIndex(peerDn, index);
+	}
         int peerDn;
 	SyncIndex index;
         std::set<std::string> deleteKeys;        // дедуп строк удаления (лениво)

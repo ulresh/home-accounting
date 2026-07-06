@@ -111,7 +111,7 @@ inline std::string headerLineFor(const Schema& s) {
 inline std::string canonicalHeaderLine() {
     return headerLineFor(canonicalSchema());
 }
-Schema::Schema(const json::object &o) {
+Schema::Schema(const json::object &o, bool add_defaults) {
     if (auto* h = o.if_contains("header"))
         for (auto& c : h->as_array())
 	    if (c.is_string())
@@ -120,10 +120,14 @@ Schema::Schema(const json::object &o) {
         for (auto& c : r->as_array())
 	    if (c.is_string())
 		reference.push_back(std::string(c.as_string()));
-    if (columns.empty())   columns = canonicalSchema().columns;
-    if (reference.empty()) reference = canonicalSchema().reference;
+    if(add_defaults) {
+	if (columns.empty())   columns = canonicalSchema().columns;
+	if (reference.empty()) reference = canonicalSchema().reference;
+    }
 }
 static Schema schemaFromHeader(const json::object& o) { return Schema(o); }
+static Schema schemaFromHeaderNodefault(const json::object& o) {
+    return Schema(o, false); }
 
 static Event *parseEventArray(const json::array& a, const Schema& s) {
     Event* ep;
@@ -668,11 +672,12 @@ void Store::listManifest(ListManifest &m) const {
 
 // Индекс = состояние собеседника: [yyyymm, offset] — сколько байт нашего
 // месячного файла у него уже есть.
-SyncIndex Store::loadSyncIndex(int peerDn) const {
-    SyncIndex idx;
-    Schema header = canonicalSchema();
-    readValues(syncIndexPath(peerDn), [&](const json::value& v){
-	if(v.is_object()) header = schemaFromHeader(v.as_object());
+void Store::loadSyncIndex(int peerDn, SyncIndex &idx) const {
+    Schema header;
+    readValues(syncIndexPath(peerDn), [&header,&idx](const json::value& v){
+	if(v.is_object())
+	    header = schemaFromHeaderNodefault(v.as_object());
+	else if(!header) ;
         else if(v.is_array()) {
 	    auto& a = v.as_array();
 	    if(a.size() >= 3 && a[0].is_string() && a[1].is_uint64() &&
@@ -684,15 +689,18 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 		    for(int r = 1, l = 2; l < a.size(); ++r, ++l)
 			if(a[r].is_uint64() && a[l].is_uint64())
 			    idx.dnMap[a[r].as_uint64()] = a[l].as_uint64();
+		    idx.empty = false;
 		    return;
 		}
 		else if(s == "people") p = &idx.people;
 		else if(s == "catalog") p = &idx.catalog;
 		else return;
+		idx.empty = false;
 		p->size = a[1].as_int64();
 		p->sha1 = a[2].as_string();
 	    }
 	    else if (a.size() >= 2 && a[0].is_uint64() && a[1].is_uint64()) {
+		idx.empty = false;
 		if(a.size() >= 3 && a[2].is_object())
 		    idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
 			schemaFromHeader(a[2].as_object()) };
@@ -702,7 +710,6 @@ SyncIndex Store::loadSyncIndex(int peerDn) const {
 	    }
 	}
     });
-    return idx;
 }
 void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
     std::stringstream content;

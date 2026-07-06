@@ -383,6 +383,12 @@ void SyncServer::cancel() {
 }
 
 namespace {
+
+#define DCMD(s) \
+    auto av = json::parse(co_await aReadLine(s, rbuf)); \
+    json::array *ao = &av.as_array(); \
+    std::string cmd(ao->at(0).as_string())
+
 asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	const std::string &peer, SyncResult &res, bool storeSync = true) {
     auto peerDeviceNo = store.addDevice(peer);
@@ -405,7 +411,13 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	    ++res.sent;
 	}
 	co_await aWrite(s, R"(["end"])" "\n"s);
+	std::string rbuf; DCMD(s);
+	if(cmd != "done"sv) {
+	    res.error = "bad protocol"sv;
+	    co_return;
+	}
 	store.saveSyncIndex(peerDeviceNo, idx);
+	res.ok = true;
     }
     else {
 	// TODO +++ idx.events[yyyymm] = +++ заголовки надо сохранить, мы можем по этим файлам ничего не записать в разделе Recv
@@ -415,7 +427,6 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	}
 	co_await aWrite(s, R"(["end"])" "\n"s);
     }
-    res.ok = true;
 }
 
 asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
@@ -505,6 +516,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 	cmd = ao->at(0).as_string();
     }
     if(cmd == "end"sv) {
+	co_await aWrite(s, R"(["done"])" "\n"s);
 	store.saveSyncIndex(peerDeviceNo, idx);
 	res.ok = true;
     }
@@ -532,11 +544,6 @@ asio::awaitable<void> aRecvAllIncrement(SslStream &s, Store &store,
     // TODO +++ recv "[\"end\"]\n"
     // TODO +++
 }
-
-#define DCMD \
-    auto av = json::parse(co_await aReadLine(*stream, rbuf)); \
-    json::array *ao = &av.as_array(); \
-    std::string cmd(ao->at(0).as_string())
 
 asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
     std::string rbuf;
@@ -579,12 +586,11 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 		auto peerDeviceNo = d.store.addDevice(peer);
 		co_await aStreamFullFile(*stream, d.store, "device"sv);
 		co_await aWrite(*stream, R"(["end"])" "\n"s);
-		DCMD;
+		DCMD(*stream);
 		if(cmd != "done"sv) {
 		    res.error = "bad protocol"sv;
 		    co_return;
 		}
-		// TODO +++ recv ["done"]\n +++ добавить перед всеми saveSyncIndex - то есть сохранять состояние собеседника только после получения от него отмашки об успехе
 		SyncIndex idx;
 		idx.device = Store::stateOf(d.store.pDevice());
 		d.store.saveSyncIndex(peerDeviceNo, idx);
@@ -592,7 +598,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    }
 	    else {
 		co_await aWrite(*stream, R"(["empty"])" "\n"s);
-		DCMD;
+		DCMD(*stream);
 		co_await aRecvAllWhenEmpty(*stream, d.store, peer, res,
 					   rbuf, ao, cmd);
 	    }
@@ -600,17 +606,18 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	else if(clientEmpty)
 	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
 	else {
+	    SyncIndex idx;
 	    auto peerDeviceNo = d.store.knowsDevice(peer);
-	    if(!peerDeviceNo ||
-	       !fs::exists(d.store.syncIndexPath(peerDeviceNo)))
+	    if(peerDeviceNo)
+		d.store.loadSyncIndex(peerDeviceNo, idx);
+	    if(idx.empty)
 		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
-					     false); // TODO +++
+					     &idx);
 	    else {
-		auto idx = d.store.loadSyncIndex(peerDeviceNo);
 		// TODO +++ send all increment
 		co_await aWrite(*stream, R"(["end"])" "\n"s);
 	    }
-	    DCMD;
+	    DCMD(*stream);
 	    co_await aRecvAllIncrement(*stream, d.store, peer, res,
 				       rbuf, ao, cmd, true, peerDeviceNo);
 	}
