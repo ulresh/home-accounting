@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <functional>
 #include <vector>
+#include <list>
 
 using namespace std::literals::string_view_literals;
 using namespace std::string_literals;
@@ -388,9 +389,14 @@ namespace {
     auto av = json::parse(co_await aReadLine(s, rbuf)); \
     json::array *ao = &av.as_array(); \
     std::string cmd(ao->at(0).as_string())
+#define CMD(s) \
+    av = json::parse(co_await aReadLine(s, rbuf)); \
+    ao = &av.as_array(); \
+    cmd = ao->at(0).as_string()
 
 asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res, bool storeSync = true) {
+	const std::string &peer, SyncResult &res,
+	SyncIndex *idxp = nullptr) {
     auto peerDeviceNo = store.addDevice(peer);
     co_await aStreamFullFile(s, store, "device"sv);
     ++res.sent;
@@ -402,7 +408,7 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	co_await aStreamFullFile(s, store, "catalog"sv);
 	++res.sent;
     }
-    if(storeSync) {
+    if(!idxp) {
 	SyncIndex idx;
 	store.listManifest(idx);
 	for(auto &[yyyymm, path] : store.enumerateMonths()) {
@@ -420,9 +426,9 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	res.ok = true;
     }
     else {
-	// TODO +++ idx.events[yyyymm] = +++ заголовки надо сохранить, мы можем по этим файлам ничего не записать в разделе Recv
 	for(auto &[yyyymm, path] : store.enumerateMonths()) {
-	    co_await aStreamFullEventFile(s, store, yyyymm, path);
+	    idxp->events[yyyymm] =
+		co_await aStreamFullEventFile(s, store, yyyymm, path);
 	    ++res.sent;
 	}
 	co_await aWrite(s, R"(["end"])" "\n"s);
@@ -442,11 +448,12 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 	[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &store, &res
 	 ](const json::value &v) -> void {
-	    newDevices.push_back(Device(v));
+	    newDevices.push_back(Device(v, false));
 	    if(newDevices.back().pubkey == store.myPubkey_) {
 		if(newDeviceNo)
 		    throw std::runtime_error("bad protocol"s);
 		newDeviceNo = newDevices.back().no;
+		newDevices.back().name = "this"s;
 	    }
 	    else if(newDevices.back().pubkey == peer) {
 		if(peerDeviceNo)
@@ -523,26 +530,59 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     else res.error = "bad protocol"sv;
 }
 
-asio::awaitable<void> aRecvAllIncrement(SslStream &s, Store &store,
+asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
+	const std::string &peer, SyncResult &res) {
+    // TODO +++ send all increment
+    co_await aWrite(s, R"(["end"])" "\n"s);
+}
+
+asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	const std::string &peer, SyncResult &res,
 	std::string &rbuf, json::array *ao, std::string cmd,
-	bool storeSync, int peerDeviceNo = 0) {
-    // TODO +++ storeSync -> dnMapPtr
+	int &peerDeviceNo, SyncIndex *idxCur, SyncIndex *idxNew) {
     if(cmd == "device"sv) {
+	std::unique_ptr<std::ofstream> outp;
+	std::list<Device> reno;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 		[&](const json::value &v) -> void {
-		    Device n(v);
-	// TODO +++
+		    Device n(v, false);
+		    bool busyno = false;
+		    for(auto &d : store.devices_)
+			if(d.pubkey == n.pubkey) {
+			    if(d.no != n.no) idxNew->dnMap[n.no] = d.no;
+			    return;
+			}
+			else if(d.no == n.no) busyno = true;
+		    if(busyno) reno.push_back(std::move(n));
+		    else store.addDevice(outp, n.no, n.pubkey);
 		});
-	// TODO +++
+	if(!reno.empty()) {
+	    auto m = store.maxDeviceNo();
+	    for(auto &n : reno) {
+		store.addDevice(outp, ++m, n.pubkey);
+		idxNew->dnMap[n.no] = m;
+	    }
+	}
+	outp.reset();
+	if(!peerDeviceNo) peerDeviceNo = store.knowsDevice(peer);
+	if(!peerDeviceNo) {
+	    res.error = "bad protocol"sv;
+	    co_return false;
+	}
+	idxNew->device = store.stateOf(store.pDevice());
     }
-    else if(storeSync && !peerDeviceNo) {
-	res.error = "bad protocol"sv;
-	co_return;
+    else {
+	if(!peerDeviceNo) {
+	    res.error = "bad protocol"sv;
+	    co_return false;
+	}
+	idxNew->device = idxCur ? idxCur->device
+	    : store.stateOf(store.pDevice());
     }
     // TODO +++ recv all increment
     // TODO +++ recv "[\"end\"]\n"
     // TODO +++
+    co_return true;
 }
 
 asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
@@ -613,13 +653,14 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    if(idx.empty)
 		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
 					     &idx);
-	    else {
-		// TODO +++ send all increment
-		co_await aWrite(*stream, R"(["end"])" "\n"s);
-	    }
+	    else co_await aSendAllIncrement(*stream, d.store, peer, res);
 	    DCMD(*stream);
-	    co_await aRecvAllIncrement(*stream, d.store, peer, res,
-				       rbuf, ao, cmd, true, peerDeviceNo);
+	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
+			rbuf, ao, cmd, peerDeviceNo, nullptr, &idx))
+		co_return;
+	    co_await aWrite(*stream, R"(["done"])" "\n"s);
+	    d.store.saveSyncIndex(peerDeviceNo, idx);
+	    res.ok = true;
 	}
 #if 0
         // обмен манифестами справочников (состояние собеседника)
@@ -719,14 +760,24 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	else if(cmd == "empty"sv)
 	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
 	else {
-	    co_await aRecvAllIncrement(*stream, d.store, peer, res,
-				       rbuf, ao, cmd, false);
+	    SyncIndex idxOld, idxCur, idxNew;
 	    auto peerDeviceNo = d.store.knowsDevice(peer);
-	    if(!peerDeviceNo) {
+	    if(peerDeviceNo) {
+		d.store.loadSyncIndex(peerDeviceNo, idxOld);
+		idxNew.dnMap = idxOld.dnMap;
+	    }
+	    d.store.listManifest(idxCur);
+	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
+			rbuf, ao, cmd, peerDeviceNo, &idxCur, &idxNew))
+		co_return;
+	    co_await aSendAllIncrement(*stream, d.store, peer, res);
+	    CMD(*stream);
+	    if(cmd != "done"sv) {
 		res.error = "bad protocol"sv;
 		co_return;
 	    }
-	    // TODO +++
+	    d.store.saveSyncIndex(peerDeviceNo, idxNew);
+	    res.ok = true;
 	}
 #if 0
         if (!d.store.knowsDevice(peer)) {

@@ -119,7 +119,7 @@ struct Schema {
 };
 
 // Манифест справочников (для обмена «состоянием» в начале сессии).
-struct ListManifest {
+struct ListManifest { // TODO +++ check usability
     FileState people, catalog, device;
 };
 struct MonthSyncData {
@@ -198,9 +198,11 @@ public:
     int knowsDevice(const std::string &pubkey) const;
     // TODO +++ int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
     bool hasData() const;
-    // int  maxDeviceNo() const;
+    int  maxDeviceNo() const;
     // void renumberSelf(int newNo);
     int addDevice(std::string_view pubkey);
+    void addDevice(std::unique_ptr<std::ofstream> &outp,
+		   int no, const std::string &pubkey);
 
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).

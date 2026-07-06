@@ -632,11 +632,11 @@ bool Store::hasData() const {
     for (auto& d : devices_) if (d.pubkey != myPubkey_) return true;
     return false;
 }
-/*int Store::maxDeviceNo() const {
+int Store::maxDeviceNo() const {
     int m = 0;
     for (auto& d : devices_) m = std::max(m, d.no);
     return m;
-}*/
+}
 /*void Store::renumberSelf(int newNo) {
     for (auto& d : devices_) if (d.pubkey == myPubkey_) d.no = newNo;
     deviceNo_ = newNo;
@@ -658,6 +658,18 @@ int Store::addDevice(std::string_view pubkey) {
     a.emplace_back(pubkey);
     appendLine(pDevice(), json::serialize(a)); // TODO +++ аналогично сделать addPeople
     return m;
+}
+
+void Store::addDevice(std::unique_ptr<std::ofstream> &outp,
+		      int no, const std::string &pubkey) {
+    devices_.emplace_back(no, pubkey);
+    auto op = outp.get();
+    if(!op) outp.reset(op = new std::ofstream(pDevice(),
+			std::ios::binary | std::ios::app));
+    json::array a;
+    a.emplace_back(no);
+    a.emplace_back(pubkey);
+    *op << json::serialize(a) << std::endl;
 }
 
 // =====================================================================

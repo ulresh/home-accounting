@@ -32,11 +32,11 @@ struct Device {
     Device(int no, std::string_view pubkey, std::string_view name = {})
 	: no(no), pubkey(pubkey), name(name)
     {}
-    Device(const json::value& v) {
+    Device(const json::value &v, bool add_name = true) {
 	auto& a = v.as_array();
 	no = a[0].as_uint64();
 	pubkey = std::string(a[1].as_string());
-	if (a.size() > 2 && a[2].is_string())
+	if(add_name && a.size() > 2 && a[2].is_string())
 	    name = std::string(a[2].as_string());
     }
     int         no = 0; // DN — порядковый номер
