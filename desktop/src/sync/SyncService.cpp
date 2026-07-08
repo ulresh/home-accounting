@@ -389,6 +389,10 @@ namespace {
     auto av = json::parse(co_await aReadLine(s, rbuf)); \
     json::array *ao = &av.as_array(); \
     std::string cmd(ao->at(0).as_string())
+#define DvCMD(s) \
+    auto av = json::parse(co_await aReadLine(s, rbuf)); \
+    ao = &av.as_array(); \
+    cmd = ao->at(0).as_string()
 #define CMD(s) \
     av = json::parse(co_await aReadLine(s, rbuf)); \
     ao = &av.as_array(); \
@@ -559,6 +563,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	if(!reno.empty()) {
 	    auto m = store.maxDeviceNo();
 	    for(auto &n : reno) {
+		if(m == std::numeric_limits<int>::max())
+		    throw std::runtime_error("too big device no"s);
 		store.addDevice(outp, ++m, n.pubkey);
 		idxNew->dnMap[n.no] = m;
 	    }
@@ -570,6 +576,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    co_return false;
 	}
 	idxNew->device = store.stateOf(store.pDevice());
+	DvCMD(s);
     }
     else {
 	if(!peerDeviceNo) {
@@ -579,6 +586,28 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	idxNew->device = idxCur ? idxCur->device
 	    : store.stateOf(store.pDevice());
     }
+    if(cmd == "people"sv) {
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
+		[&](const json::value &v) -> void {
+		    // TODO +++
+		});
+	// TODO +++
+	idxNew->people = store.stateOf(store.pPeople());
+	DvCMD(s);
+    }
+    else idxNew->people = idxCur ? idxCur->people
+	    : store.stateOf(store.pPeople());
+    if(cmd == "catalog"sv) {
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
+		[&](const json::value &v) -> void {
+		    // TODO +++
+		});
+	// TODO +++
+	idxNew->catalog = store.stateOf(store.pCatalog());
+	DvCMD(s);
+    }
+    else idxNew->catalog = idxCur ? idxCur->catalog
+	    : store.stateOf(store.pCatalog());
     // TODO +++ recv all increment
     // TODO +++ recv "[\"end\"]\n"
     // TODO +++

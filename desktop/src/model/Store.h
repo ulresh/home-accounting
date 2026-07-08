@@ -1,5 +1,6 @@
 #pragma once
 #include "Types.h"
+#include "../shorts.h"
 #include <map>
 #include <set>
 #include <string>
@@ -241,8 +242,10 @@ public:
     // Действующий заголовок (схема) месяца — для дозаписи заголовка перед хвостом.
     // TODO +++ std::string inEffectHeader(int yyyymm) const;
 
-    std::filesystem::path root() const { return root_; }
-    std::filesystem::path pDevice() const { return dbDir()/"device.jsonl"s; }
+    fs::path root() const { return root_; }
+    fs::path pDevice() const { return dbDir()/"device.jsonl"s; }
+    fs::path pPeople() const { return dbDir()/"people.jsonl"s; }
+    fs::path pCatalog() const { return dbDir()/"catalog.jsonl"s; }
 
 public:
     std::filesystem::path dbDir() const { return root_ / db_; }

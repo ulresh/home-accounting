@@ -518,6 +518,10 @@ ai-r.txt
 
 
 
+!2026-07-08 21:43:52
+Удаление из device/people/catalog.
+
+
 
 
 TODO

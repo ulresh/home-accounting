@@ -651,6 +651,8 @@ int Store::addDevice(std::string_view pubkey) {
 	if(d.pubkey == pubkey) return d.no;
 	if(m < d.no) m = d.no;
     }
+    if(m == std::numeric_limits<int>::max())
+	throw std::runtime_error("too big device no"s);
     devices_.push_back(Device{++m, std::string(pubkey)});
     // saveDevices();
     json::array a;
