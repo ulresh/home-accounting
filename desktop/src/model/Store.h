@@ -83,22 +83,6 @@ struct FileState {
     }
 };
 
-// План отправки одного блока БЕЗ данных в памяти: заголовок-строка + (опц.)
-// prepend + содержимое файла [fileFrom, fileFrom+fileLen). Сеть-уровень читает
-// файл блоками и сразу шлёт. Кадры:
-//   kind = "event-tail"   -> [event-tail, yyyymm, offset, size]\n<данные>\n
-//   kind = "device-data"  -> [device-data, size]\n<данные>\n  (people/catalog — аналогично)
-/* TODO +++ struct SyncSendItem {
-    std::string           kind;
-    int                   month  = 0;     // yyyymm (event-tail)
-    long long             offset = 0;     // смещение в кадре (event-tail)
-    std::string           prepend;        // байты перед содержимым файла (заголовок хвоста)
-    std::filesystem::path path;           // источник
-    long long             fileFrom = 0;
-    long long             fileLen  = 0;
-    long long frameSize() const { return (long long)prepend.size() + fileLen; }
-};*/
-
 // Схема событийной строки: порядок/состав колонок и состав «ссылки» (reference),
 // по которой строятся delete/this. Собеседник может прислать другой порядок —
 // мы храним строки так, как получили (только с DN map), поэтому в одном файле
@@ -214,33 +198,6 @@ public:
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
     void loadSyncIndex(int peerDn, SyncIndex &idx) const;
     void saveSyncIndex(int peerDn, const SyncIndex &idx) const;
-
-    // Начать/закончить сессию синхронизации с партнёром (peerDn — его номер у нас).
-    void syncBegin(int peerDn);
-    void syncEnd();
-
-    // Что отправить партнёру (без данных — только план: путь/смещение/длина).
-    // Решение принимается по СОСТОЯНИЮ СОБЕСЕДНИКА: справочники шлём, только если
-    // наша версия отличается от того, что у партнёра (peer); хвосты — от offset,
-    // который партнёр уже получил.
-    // TODO +++ std::vector<SyncSendItem> syncPlanOutgoing(const ListManifest& peer) const;
-
-    // Потоковый приём блока: begin -> feed(блоки сети) -> finish. Применяется
-    // сразу по мере поступления, без накопления всего блока в памяти.
-    void syncRecvBegin(const std::string& kind, int month, bool replaceLists);
-    void syncRecvFeed(const char* data, std::size_t n);
-    void syncRecvFinish();
-
-    // Удаление более поздних дубликатов (совпадение всех полей кроме служебных).
-    int  syncDedup();
-
-    // Зафиксировать состояние собеседника (после успешного обмена).
-    void syncCommit(int peerDn);
-
-    int  syncReceived() const { return sync_ ? sync_->received : 0; }
-
-    // Действующий заголовок (схема) месяца — для дозаписи заголовка перед хвостом.
-    // TODO +++ std::string inEffectHeader(int yyyymm) const;
 
     fs::path root() const { return root_; }
     fs::path pDevice() const { return dbDir()/"device.jsonl"s; }
