@@ -645,15 +645,6 @@ int Store::knowsDevice(const std::string& pubkey) const {
     for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
     return 0;
 }
-/* TODO +++ int Store::reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name) {
-    for (auto& d : devices_) if (d.pubkey == pubkey) return d.no;
-    int maxNo = 0; bool taken = false;
-    for (auto& d : devices_) { maxNo = std::max(maxNo, d.no); if (d.no == preferredNo) taken = true; }
-    int no = (preferredNo > 0 && !taken) ? preferredNo : maxNo + 1;
-    devices_.push_back(Device{no, pubkey, name});
-    saveDevices();
-    return no;
-}*/
 bool Store::hasData() const {
     if (!events_.empty()) return true;
     if (!people_.empty()) return true;
@@ -666,12 +657,6 @@ int Store::maxDeviceNo() const {
     for (auto& d : devices_) m = std::max(m, d.no);
     return m;
 }
-/*void Store::renumberSelf(int newNo) {
-    for (auto& d : devices_) if (d.pubkey == myPubkey_) d.no = newNo;
-    deviceNo_ = newNo;
-    saveDevices();
-    saveConfig();
-}*/
 
 int Store::addDevice(std::string_view pubkey) {
     int m = 0;

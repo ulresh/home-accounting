@@ -181,10 +181,8 @@ public:
     std::filesystem::path keyPath() const;
 
     int knowsDevice(const std::string &pubkey) const;
-    // TODO +++ int  reserveDeviceNo(const std::string& pubkey, int preferredNo, const std::string& name);
     bool hasData() const;
     int  maxDeviceNo() const;
-    // void renumberSelf(int newNo);
     int addDevice(std::string_view pubkey);
     void addDevice(std::unique_ptr<std::ofstream> &outp,
 		   int no, const std::string &pubkey);
