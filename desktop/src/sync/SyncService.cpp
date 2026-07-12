@@ -299,7 +299,7 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
     auto peerDeviceNo = store.addDevice(peer);
     co_await aStreamFullFile(s, store, "device"sv);
     ++res.sent;
-    if(!store.people_.empty()) {
+    if(!store.people_.empty() || !store.people_delete.empty()) {
 	co_await aStreamFullFile(s, store, "people"sv);
 	++res.sent;
     }
@@ -376,8 +376,9 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 	decltype(store.people_) newPeople;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 		[&newPeople,&res](const json::value &v) -> void {
-		    newPeople.insert(newPeople.end(),
-				     std::string(v.as_string()));
+		    // newPeople.insert(newPeople.end(),
+		    // 		     std::string(v.as_string()));
+		    // TODO +++
 		    ++res.received;
 		});
 	store.people_.swap(newPeople);

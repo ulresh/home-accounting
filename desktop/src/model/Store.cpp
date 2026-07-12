@@ -302,14 +302,40 @@ void Store::saveDevices() {
 
 void Store::loadPeople() {
     people_.clear();
+    people_delete.clear();
+    People *p = &people_;
     readValues(dbDir() / "people.jsonl", [&](const json::value& v){
-        if (v.is_string())
-	    people_.insert(people_.end(), std::string(v.as_string()));
+        if(v.is_object())
+	    for(auto &[value,time] : v.as_object())
+		if(time.is_string())
+		    p->emplace_hint(p->end(), std::string(value.as_string()),
+				    std::string(time.as_string()));
+	else if(v.is_array()) {
+	    auto a = v.as_array();
+	    if(a.size() == 1 && a[0] == "delete"s)
+		p = &people_delete;
+	}
     });
 }
+
 void Store::savePeople() {
     std::string content;
-    for (auto& p : people_) content += json::serialize(jv(p)) + "\n";
+    for (auto& p : people_) {
+	// json::array a;
+	// a.emplace_back(p.first);
+	// a.emplace_back(p.second);
+	json::object a;
+	a[p.first] = p.second;
+	content += json::serialize(a) + "\n";
+    }
+    if(!people_delete.empty()) {
+	content += R"(["delete"])" "\n"sv;
+	for (auto& p : people_delete) {
+	    json::object a;
+	    a[p.first] = p.second;
+	    content += json::serialize(a) + "\n";
+	}
+    }
     writeAtomic(dbDir() / "people.jsonl", content);
 }
 
@@ -504,12 +530,16 @@ Event Store::editEvent(const std::shared_ptr<Event> &oldEv,
 }
 
 void Store::addPerson(const std::string& name) {
-    if (name.empty()) return;
-    if(people_.insert(name).second)
-	savePeople();
+    if(name.empty()) return;
+    people_delete.erase(name);
+    people_[name] = nowStamp();
+    savePeople();
 }
 void Store::removePerson(const std::string& name) {
-    if(people_.erase(name)) savePeople();
+    if(people_.erase(name)) {
+	people_delete[name] = nowStamp();
+	savePeople();
+    }
 }
 
 void Store::upsertCatalog(const CatalogEntry& e) {
