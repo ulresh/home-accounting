@@ -154,7 +154,7 @@ public:
     int  fontSize() const { return fontSize_; }
     void setFontSize(int pt);
 
-    typedef std::set<std::string> People;
+    typedef std::map<std::string, std::string> People; // значение-время
     typedef std::map<std::string, std::set<std::string> > Catalog;
     typedef std::set<std::shared_ptr<Event>, CompareEventsSet> Events;
     typedef std::vector<std::shared_ptr<Event> > TempEvents;
@@ -279,7 +279,7 @@ public:
     int fontSize_ = 0;
     std::string myPubkey_;
 
-    People people_;
+    People people_, people_delete;
     Catalog catalog_;
     std::vector<Device>       devices_;
     Events events_;
@@ -287,37 +287,6 @@ public:
     std::set<int> canonicalSchemaMonths_;
     std::string lastEdit_;
     int lastEditSeq_ = 0;
-
-    // Потоковый приём одного блока: инкрементный разбор по мере поступления байт.
-    struct RecvState {
-        std::string kind;
-        int month = 0;
-        bool replaceLists = false;
-        json::stream_parser sp;
-        bool atStart = true;
-        Schema cur;
-        bool headerReceived = false;
-        std::vector<std::string>  people;        // накопление для replace/merge
-        std::vector<CatalogEntry> catalog;
-    };
-
-    // Состояние активной сессии синхронизации (между syncBegin/syncEnd).
-    struct SyncSession {
-	SyncSession(const Store &s, int peerDn)
-	    : peerDn(peerDn)
-	{
-	    s.loadSyncIndex(peerDn, index);
-	}
-        int peerDn;
-	SyncIndex index;
-        std::set<std::string> deleteKeys;        // дедуп строк удаления (лениво)
-        bool deleteKeysLoaded = false;
-        int received = 0;
-        std::unique_ptr<RecvState> recv;         // текущий принимаемый блок
-    };
-    std::unique_ptr<SyncSession> sync_;
-    // TODO +++ void ensureDeleteKeysLoaded();
-    void handleRecvValue(const json::value& v);
 };
 
 struct MonthEvents {

@@ -109,24 +109,6 @@ asio::awaitable<std::string> aReadLine(SslStream& s, std::string& rbuf) {
     co_return line;
 }
 
-/*
-// Прочитать ровно count байт, отдавая их блоками в sink сразу (без накопления).
-asio::awaitable<void> aReadToSink(SslStream& s, std::string& rbuf, std::size_t count,
-                                  std::function<void(const char*, std::size_t)> sink) {
-    if (!rbuf.empty()) {
-        std::size_t take = std::min(count, rbuf.size());
-        if (take) { sink(rbuf.data(), take); rbuf.erase(0, take); count -= take; }
-    }
-    char block[16384];
-    while (count > 0) {
-        std::size_t want = std::min(count, sizeof(block));
-        std::size_t got = co_await s.async_read_some(asio::buffer(block, want), asio::use_awaitable);
-        sink(block, got);
-        count -= got;
-    }
-}
-*/
-
 asio::awaitable<void> aReadSizedJson(SslStream &s, std::string &rbuf,
 	std::size_t count, std::function<void(const json::value &v)> sink) {
     json::stream_parser sp;
@@ -245,93 +227,6 @@ asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
     co_await aWrite(s, "\n"s);
     co_return MonthSyncData{size, std::move(header)};
 }
-
-/*
-// Прочитать файл [from, from+len) блоками и сразу слать в сеть (без накопления).
-asio::awaitable<void> aStreamFile(SslStream& s, fs::path path, long long from, long long len) {
-    std::ifstream in(path, std::ios::binary);
-    if (in) in.seekg(from);
-    char block[16384];
-    long long remaining = len;
-    while (remaining > 0 && in) {
-        std::streamsize want = (std::streamsize)std::min<long long>(remaining, (long long)sizeof(block));
-        in.read(block, want);
-        std::streamsize got = in.gcount();
-        if (got <= 0) break;
-        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got), asio::use_awaitable);
-        remaining -= got;
-    }
-}
-
-asio::awaitable<void> aSendItems(SslStream& s, std::vector<SyncSendItem> items) {
-    for (auto& it : items) {
-        json::array h;
-        if (it.kind == "event-tail") {
-            h.emplace_back("event-tail"); h.emplace_back(it.month);
-            h.emplace_back((int64_t)it.offset); h.emplace_back((int64_t)it.frameSize());
-        } else {
-            h.emplace_back(it.kind); h.emplace_back((int64_t)it.frameSize());
-        }
-        co_await aWriteLine(s, json::serialize(h));
-        if (!it.prepend.empty()) co_await aWrite(s, it.prepend);
-        co_await aStreamFile(s, it.path, it.fileFrom, it.fileLen);
-        co_await aWrite(s, "\n");
-    }
-    co_await aWriteLine(s, "[\"end\"]");
-}
-
-asio::awaitable<void> aRecvItems(SslStream& s, std::string& rbuf, Store& store, bool replaceLists) {
-    for (;;) {
-        std::string line = co_await aReadLine(s, rbuf);
-        if (line.empty()) continue;
-        json::value v = json::parse(line);
-        auto& a = v.as_array();
-        std::string kind = std::string(a[0].as_string());
-        if (kind == "end") break;
-        int month = 0; long long size = 0;
-        if (kind == "event-tail") { month = (int)a[1].as_int64(); size = a[3].as_int64(); }
-        else size = a[1].as_int64();
-        store.syncRecvBegin(kind, month, replaceLists);
-        co_await aReadToSink(s, rbuf, (std::size_t)size,
-            [&store](const char* d, std::size_t n){ store.syncRecvFeed(d, n); });
-        store.syncRecvFinish();
-        co_await aReadToSink(s, rbuf, 1, [](const char*, std::size_t){});   // завершающий '\n'
-    }
-}
-
-// ---- манифест справочников ----
-std::string manifestJson(const ListManifest& m) {
-    auto arr = [](const FileState& f){ json::array a; a.emplace_back((int64_t)f.size); a.emplace_back(f.sha1); return a; };
-    json::object inner;
-    inner["people"]  = arr(m.people);
-    inner["catalog"] = arr(m.catalog);
-    inner["device"]  = arr(m.device);
-    json::object o; o["manifest"] = std::move(inner);
-    return json::serialize(o);
-}
-ListManifest manifestParse(const std::string& line) {
-    ListManifest m;
-    try {
-        auto v = json::parse(line);
-        auto& mo = v.as_object().at("manifest").as_object();
-        auto rd = [&](const char* k, FileState& f){
-            if (auto* p = mo.if_contains(k)) {
-                auto& a = p->as_array();
-                if (a.size() >= 2) { f.size = a[0].as_int64(); f.sha1 = std::string(a[1].as_string()); }
-            }
-        };
-        rd("people", m.people); rd("catalog", m.catalog); rd("device", m.device);
-    } catch (...) {}
-    return m;
-}
-
-std::string summaryLine(int received) {
-    return json::serialize(json::object{{"summary", json::object{{"received", received}}}});
-}
-int summaryReceived(const std::string& line) {
-    return (int)json::parse(line).as_object().at("summary").as_object().at("received").as_int64();
-}
-*/
 
 } // namespace
 
@@ -609,6 +504,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     else idxNew->catalog = idxCur ? idxCur->catalog
 	    : store.stateOf(store.pCatalog());
     // TODO +++ recv all increment
+    // TODO +++ не забыть почистить дубликаты в event
     // TODO +++ recv "[\"end\"]\n"
     // TODO +++
     co_return true;
@@ -691,25 +587,6 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    d.store.saveSyncIndex(peerDeviceNo, idx);
 	    res.ok = true;
 	}
-#if 0
-        // обмен манифестами справочников (состояние собеседника)
-        co_await aWriteLine(*stream, manifestJson(d.store.listManifest()));
-        ListManifest peerMan = manifestParse(co_await aReadLine(*stream, rbuf));
-
-        int peerLocal = d.store.reserveDeviceNo(peer, clientDevNo, "peer");
-        d.store.syncBegin(peerLocal);
-        co_await aRecvItems(*stream, rbuf, d.store, /*replaceLists=*/false);   // принять и слить
-        d.store.syncDedup();
-        co_await aSendItems(*stream, d.store.syncPlanOutgoing(peerMan));       // отдать (потоково)
-        int ks = d.store.syncReceived();
-
-        co_await aWriteLine(*stream, summaryLine(ks));
-        int kc = summaryReceived(co_await aReadLine(*stream, rbuf));
-
-        d.store.syncCommit(peerLocal);
-        d.store.syncEnd();
-        res.ok = true; res.received = ks; res.sent = kc;
-#endif
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
         d.store.syncEnd();
@@ -808,29 +685,6 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	    d.store.saveSyncIndex(peerDeviceNo, idxNew);
 	    res.ok = true;
 	}
-#if 0
-        if (!d.store.knowsDevice(peer)) {
-            if (!confirm || !confirm(peer)) { res.error = "rejected"; co_return; }
-            d.store.reserveDeviceNo(peer, serverDevNo, "peer");
-        }
-
-        ListManifest serverMan = manifestParse(co_await aReadLine(*stream, rbuf));  // сервер прислал манифест
-        co_await aWriteLine(*stream, manifestJson(d.store.listManifest()));
-
-        int peerLocal = d.store.reserveDeviceNo(peer, serverDevNo, "peer");
-        d.store.syncBegin(peerLocal);
-        co_await aSendItems(*stream, d.store.syncPlanOutgoing(serverMan));     // отдать (потоково)
-        co_await aRecvItems(*stream, rbuf, d.store, /*replaceLists=*/true);    // принять итог как есть
-        d.store.syncDedup();
-        int kc = d.store.syncReceived();
-
-        int ks = summaryReceived(co_await aReadLine(*stream, rbuf));
-        co_await aWriteLine(*stream, summaryLine(kc));
-
-        d.store.syncCommit(peerLocal);
-        d.store.syncEnd();
-        res.ok = true; res.received = kc; res.sent = ks;
-#endif
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
         d.store.syncEnd();
