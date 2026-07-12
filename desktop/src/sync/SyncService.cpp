@@ -373,15 +373,25 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     ao = &av.as_array();
     cmd = ao->at(0).as_string();
     if(cmd == "people"sv) {
-	decltype(store.people_) newPeople;
+	decltype(store.people_) newPeople, newPeopleDelete;
+	auto *p = &newPeople;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
-		[&newPeople,&res](const json::value &v) -> void {
-		    // newPeople.insert(newPeople.end(),
-		    // 		     std::string(v.as_string()));
-		    // TODO +++
+		[&p,&newPeopleDelete,&res](const json::value &v) -> void {
+        if(v.is_object())
+	    for(auto &[value,time] : v.as_object())
+		if(time.is_string())
+		    p->emplace_hint(p->end(), std::string(value),
+				    std::string(time.as_string()));
+	else if(v.is_array()) {
+	    auto a = v.as_array();
+	    if(a.size() == 1 && a[0].is_string() &&
+	       a[0].as_string() == "delete"s)
+		p = &newPeopleDelete;
+	}
 		    ++res.received;
 		});
 	store.people_.swap(newPeople);
+	store.people_delete.swap(newPeopleDelete);
 	store.savePeople();
 	av = json::parse(co_await aReadLine(s, rbuf));
 	ao = &av.as_array();
