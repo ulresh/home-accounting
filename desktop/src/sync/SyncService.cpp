@@ -493,11 +493,38 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    : store.stateOf(store.pDevice());
     }
     if(cmd == "people"sv) {
+	bool part_delete = false;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 		[&](const json::value &v) -> void {
-		    // TODO +++
+        if(v.is_object())
+	    for(auto &[value,time] : v.as_object())
+		if(time.is_string()) {
+		    ++res.received;
+		    std::string v(value), t(time.as_string());
+		    if(part_delete) {
+			auto a = store.people_.find(v);
+			if(a == store.people_.end()) ;
+			else if(a->second >= t) return;
+			else store.people_.erase(a);
+			auto &d = store.people_delete[v];
+			if(d < t) d = t;
+		    }
+		    else {
+			auto d = store.people_delete.find(v);
+			if(d == store.people_delete.end()) ;
+			else if(d->second > t) return;
+			else store.people_delete.erase(d);
+			auto &a = store.people_[v];
+			if(a < t) a = t;
+		    }
+		}
+	else if(v.is_array()) {
+	    auto a = v.as_array();
+	    if(a.size() == 1 && a[0].is_string() &&
+	       a[0].as_string() == "delete"s)
+		part_delete = true;
+	}
 		});
-	// TODO +++
 	idxNew->people = store.stateOf(store.pPeople());
 	DvCMD(s);
     }
