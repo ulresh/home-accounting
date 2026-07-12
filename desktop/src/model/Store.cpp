@@ -308,11 +308,12 @@ void Store::loadPeople() {
         if(v.is_object())
 	    for(auto &[value,time] : v.as_object())
 		if(time.is_string())
-		    p->emplace_hint(p->end(), std::string(value.as_string()),
+		    p->emplace_hint(p->end(), std::string(value),
 				    std::string(time.as_string()));
 	else if(v.is_array()) {
 	    auto a = v.as_array();
-	    if(a.size() == 1 && a[0] == "delete"s)
+	    if(a.size() == 1 && a[0].is_string() &&
+	       a[0].as_string() == "delete"s)
 		p = &people_delete;
 	}
     });
@@ -475,7 +476,6 @@ void Store::ensureCanonicalHeader(int yyyymm) {
 }
 
 bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update) {
-    if (sync_) ; // TODO +++ { ensureDeleteKeysLoaded(); if (sync_->deleteKeys.count(dkey)) return false; }
     std::string stamp = nowStamp();
     int ym = yyyymmOf(tgtEdit);
     int rn = allocRecNo(stamp, ym);
@@ -487,7 +487,6 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     o["this"]   = std::move(ths);
     if (update) o["update"] = true;
     appendToMonth(ym, json::serialize(o));
-    if (sync_) ; // TODO +++ sync_->deleteKeys.insert(dkey);
     return true;
 }
 

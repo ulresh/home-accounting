@@ -590,7 +590,6 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	}
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
-        d.store.syncEnd();
         if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
     }
     co_return;
@@ -688,7 +687,6 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 	}
         boost::system::error_code ec; stream->shutdown(ec);
     } catch (const std::exception& e) {
-        d.store.syncEnd();
         if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
     }
     co_return;
