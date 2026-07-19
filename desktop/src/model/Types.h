@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <set>
+#include <map>
 #include <optional>
 #include <cstdint>
 #include "../shorts.h"
@@ -48,6 +49,11 @@ struct Device {
 struct CatalogEntry {
     std::string category;
     std::set<std::string> items;
+};
+
+struct CategoryItems {
+    std::string addtime;
+    std::map<std::string, std::string> items, deleted;
 };
 
 } // namespace ha

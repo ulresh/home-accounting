@@ -340,29 +340,64 @@ void Store::savePeople() {
     writeAtomic(dbDir() / "people.jsonl", content);
 }
 
-void Store::appendCatalog(Catalog &catalog_, const json::value &v) {
-    auto& a = v.as_array();
-    if (a.empty()) return;
-    auto p = catalog_.try_emplace(catalog_.end(),
-				  std::string(a[0].as_string()));
-    for (size_t i = 1; i < a.size(); ++i)
-	p->second.insert(p->second.end(),
-			 std::string(a[i].as_string()));
-}
-
 void Store::loadCatalog() {
     catalog_.clear();
+    decltype(CategoryItems::items) *cur = nullptr, *del = nullptr;
     readValues(dbDir() / "catalog.jsonl", [&](const json::value &v){
-        try { appendCatalog(v); } catch (...) {}
+        if(v.is_object()) {
+	    for(auto &[jn,jt] : v.as_object()) if(jt.is_string()) {
+		std::string sn(jn), st(jt.as_string());
+		if(cur) cur->at(sn) = st;
+		else {
+		    auto &cat = catalog_[sn];
+		    cat.addtime = st;
+		    cur = &cat.items;
+		    del = &cat.deleted;
+		}
+	    }
+	}
+	else if(v.is_array()) {
+	    auto &a = v.as_array();
+	    if(a.size() == 1 && a[0].is_string()) {
+		std::string c(a[0].as_string());
+		if(c == "end"s) cur = del = nullptr;
+		else if(c == "delete"s) {
+		    if(cur) cur = del;
+		    else cur = &catalog_delete;
+		}
+	    }
+	}
     });
 }
 void Store::saveCatalog() {
     std::string content;
-    for (auto& e : catalog_) {
-        json::array a;
-        a.emplace_back(e.first);
-        for (auto& it : e.second) a.emplace_back(it);
-        content += json::serialize(a) + "\n";
+    for(auto &[category_name,items] : catalog_) {
+	{   json::object c;
+	    c[category_name] = items.addtime;
+	    content += json::serialize(c) + "\n";
+	}
+	for(auto &[item_name,item_addtime] : items.items) {
+	    json::object i;
+	    i[item_name] = item_addtime;
+	    content += json::serialize(i) + "\n";
+	}
+	if(!items.deleted.empty()) {
+	    content += R"(["delete"])" "\n"s;
+	    for(auto &[item_name,item_addtime] : items.deleted) {
+		json::object i;
+		i[item_name] = item_addtime;
+		content += json::serialize(i) + "\n";
+	    }
+	}
+	content += R"(["end"])" "\n"s;
+    }
+    if(!catalog_delete.empty()) {
+	content += R"(["delete"])" "\n"s;
+	for(auto &[item_name,item_addtime] : catalog_delete) {
+	    json::object i;
+	    i[item_name] = item_addtime;
+	    content += json::serialize(i) + "\n";
+	}
     }
     writeAtomic(dbDir() / "catalog.jsonl", content);
 }
@@ -436,7 +471,7 @@ void MonthEvents::commit(int yyyymm) {
 
 std::string Store::categoryOf(const std::string& subject) const {
     for (auto& e : catalog_)
-	if(e.second.contains(subject)) return e.first;
+	if(e.second.items.contains(subject)) return e.first;
     return {};
 }
 
@@ -541,13 +576,17 @@ void Store::removePerson(const std::string& name) {
     }
 }
 
-void Store::upsertCatalog(const CatalogEntry& e) {
-    auto [p,a] = catalog_.try_emplace(e.category, e.items);
-    if(!a) p->second.insert(e.items.begin(), e.items.end());
-    saveCatalog();
-}
-void Store::replaceCatalog(const Catalog &list) {
-    catalog_ = list;
+void Store::upsertCatalog(const CatalogEntry &e) {
+    // TODO +++ нам скорее всего будет нужен не столько upsert, сколько insert+replace
+    auto now = nowStamp();
+    catalog_delete.erase(e.category);
+    auto &cat = catalog_[e.category];
+    if(cat.addtime.empty()) cat.addtime = now;
+    for(auto &item : e.items) {
+	cat.deleted.erase(item);
+	auto &t = cat.items[item];
+	if(t.empty()) t = now;
+    }
     saveCatalog();
 }
 
@@ -601,7 +640,7 @@ void Store::categoryMembers(std::set<std::string> &result,
     stack.push_back(&category.second);
     while (!stack.empty()) {
         auto cat = stack.back(); stack.pop_back();
-	for(auto &item : *cat) {
+	for(auto &[item,ignore] : cat->items) {
 	    auto [p,added] = result.insert(item);
 	    if(added) {
 		auto child = catalog_.find(item);

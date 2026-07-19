@@ -402,6 +402,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 	decltype(store.catalog_) newCatalog;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 		[&newCatalog,&res](const json::value &v) -> void {
+		    // TODO +++
 		    Store::appendCatalog(newCatalog, v);
 		    ++res.received;
 		});
