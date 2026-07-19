@@ -325,6 +325,7 @@ asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
 	res.ok = true;
     }
     else {
+	store.listManifest(*idxp);
 	for(auto &[yyyymm, path] : store.enumerateMonths()) {
 	    idxp->events[yyyymm] =
 		co_await aStreamFullEventFile(s, store, yyyymm, path);
@@ -441,7 +442,36 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 }
 
 asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res) {
+	const std::string &peer, SyncResult &res,
+	SyncIndex *idxPeer, SyncIndex *idxCur) {
+    FileState tmp, *cur;
+    if(idxCur) cur = &idxCur->device; else {
+	tmp = store.stateOf(store.pDevice());
+	cur = &tmp;
+    }
+    if(idxPeer->device != *cur) {
+	co_await aStreamFullFile(s, store, "device"sv);
+	++res.sent;
+	if(!idxCur) idxPeer->device = *cur;
+    }
+    if(idxCur) cur = &idxCur->people; else {
+	tmp = store.stateOf(store.pPeople());
+	cur = &tmp;
+    }
+    if(idxPeer->people != *cur) {
+	co_await aStreamFullFile(s, store, "people"sv);
+	++res.sent;
+	if(!idxCur) idxPeer->people = *cur;
+    }
+    if(idxCur) cur = &idxCur->catalog; else {
+	tmp = store.stateOf(store.pCatalog());
+	cur = &tmp;
+    }
+    if(idxPeer->catalog != *cur) {
+	co_await aStreamFullFile(s, store, "catalog"sv);
+	++res.sent;
+	if(!idxCur) idxPeer->catalog = *cur;
+    }
     // TODO +++ send all increment
     co_await aWrite(s, R"(["end"])" "\n"s);
 }
@@ -543,6 +573,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    : store.stateOf(store.pCatalog());
     // TODO +++ recv all increment
     // TODO +++ не забыть почистить дубликаты в event
+    // TODO +++ idxCur -> idxNew для отсутствующих на приёме
     // TODO +++ recv "[\"end\"]\n"
     // TODO +++
     co_return true;
@@ -616,7 +647,8 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 	    if(idx.empty)
 		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
 					     &idx);
-	    else co_await aSendAllIncrement(*stream, d.store, peer, res);
+	    else co_await aSendAllIncrement(*stream, d.store, peer, res,
+					    &idx, nullptr);
 	    DCMD(*stream);
 	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
 			rbuf, ao, cmd, peerDeviceNo, nullptr, &idx))
@@ -709,11 +741,12 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 		d.store.loadSyncIndex(peerDeviceNo, idxOld);
 		idxNew.dnMap = idxOld.dnMap;
 	    }
-	    d.store.listManifest(idxCur);
+	    d.store.listManifest(idxCur); // TODO +++ manifest -> full
 	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
 			rbuf, ao, cmd, peerDeviceNo, &idxCur, &idxNew))
 		co_return;
-	    co_await aSendAllIncrement(*stream, d.store, peer, res);
+	    co_await aSendAllIncrement(*stream, d.store, peer, res,
+				       &idxOld, &idxCur);
 	    CMD(*stream);
 	    if(cmd != "done"sv) {
 		res.error = "bad protocol"sv;
