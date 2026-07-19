@@ -6,11 +6,13 @@
 
 namespace ha {
 
+typedef std::function<void(const boost::json::value&)> ValueCallback;
+
 // Прочитать файл как последовательность JSON-значений. Файл читается БЛОКАМИ
 // фиксированного размера, каждый блок сразу передаётся инкрементному парсеру —
 // целиком в память файл не загружается. Границы значений определяет парсер.
 bool readValues(const std::filesystem::path& p,
-                const std::function<void(const boost::json::value&)>& onValue);
+                const ValueCallback& onValue);
 
 // Дозаписать одну строку (+\n) в конец файла, создав родительские папки.
 void appendLine(const std::filesystem::path& p, const std::string& line);

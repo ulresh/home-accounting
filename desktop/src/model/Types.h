@@ -51,9 +51,10 @@ struct CatalogEntry {
     std::set<std::string> items;
 };
 
+typedef std::map<std::string, std::string> CategoryMap;
 struct CategoryItems {
     std::string addtime;
-    std::map<std::string, std::string> items, deleted;
+    CategoryMap items, deleted;
 };
 
 } // namespace ha

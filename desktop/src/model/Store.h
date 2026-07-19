@@ -166,9 +166,6 @@ public:
     void addPerson(const std::string& name);
     void removePerson(const std::string& name);
     void upsertCatalog(const CatalogEntry& e);
-    static void appendCatalog(Catalog &catalog_, const json::value &v);
-    void appendCatalog(const json::value &v) { appendCatalog(catalog_, v); }
-
     void categoryMembers(std::set<std::string> &result,
 			 Catalog::const_reference category) const;
     TempEvents filter(const std::string& q) const;
@@ -235,13 +232,20 @@ public:
 
     People people_, people_delete;
     Catalog catalog_;
-    std::map<std::string, std::string> catalog_delete;
+    CategoryMap catalog_delete;
     std::vector<Device>       devices_;
     Events events_;
 
     std::set<int> canonicalSchemaMonths_;
     std::string lastEdit_;
     int lastEditSeq_ = 0;
+};
+
+struct CatalogLoader {
+    void add(const json::value &v);
+    Store::Catalog catalog_;
+    CategoryMap catalog_delete;
+    CategoryMap *cur = nullptr, *del = nullptr;
 };
 
 struct MonthEvents {

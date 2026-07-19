@@ -399,14 +399,14 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 	cmd = ao->at(0).as_string();
     }
     if(cmd == "catalog"sv) {
-	decltype(store.catalog_) newCatalog;
+	CatalogLoader loader;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
-		[&newCatalog,&res](const json::value &v) -> void {
-		    // TODO +++
-		    Store::appendCatalog(newCatalog, v);
+		[&loader,&res](const json::value &v) -> void {
+		    loader.add(v);
 		    ++res.received;
 		});
-	store.catalog_.swap(newCatalog);
+	store.catalog_.swap(loader.catalog_);
+	store.catalog_delete.swap(loader.catalog_delete);
 	store.saveCatalog();
 	av = json::parse(co_await aReadLine(s, rbuf));
 	ao = &av.as_array();

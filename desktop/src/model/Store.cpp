@@ -340,10 +340,7 @@ void Store::savePeople() {
     writeAtomic(dbDir() / "people.jsonl", content);
 }
 
-void Store::loadCatalog() {
-    catalog_.clear();
-    decltype(CategoryItems::items) *cur = nullptr, *del = nullptr;
-    readValues(dbDir() / "catalog.jsonl", [&](const json::value &v){
+void CatalogLoader::add(const json::value &v) {
         if(v.is_object()) {
 	    for(auto &[jn,jt] : v.as_object()) if(jt.is_string()) {
 		std::string sn(jn), st(jt.as_string());
@@ -367,7 +364,15 @@ void Store::loadCatalog() {
 		}
 	    }
 	}
+}
+
+void Store::loadCatalog() {
+    CatalogLoader loader;
+    readValues(dbDir() / "catalog.jsonl", [&loader](const json::value &v){
+	loader.add(v);
     });
+    catalog_.swap(loader.catalog_);
+    catalog_delete.swap(loader.catalog_delete);
 }
 void Store::saveCatalog() {
     std::string content;
