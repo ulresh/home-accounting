@@ -366,6 +366,64 @@ void CatalogLoader::add(const json::value &v) {
 	}
 }
 
+void CatalogIncrementLoader::add(const json::value &v) {
+        if(v.is_object()) {
+	    for(auto &[jn,jt] : v.as_object()) if(jt.is_string()) {
+		std::string sn(jn), st(jt.as_string());
+		switch(state) {
+		case 0: {
+		    auto del = store.catalog_delete.find(sn);
+		    if(del == store.catalog_delete.end()) ;
+		    else if(del->second > st) { state = 4; break; }
+		    else store.catalog_delete.erase(del);
+		    auto &act = store.catalog_[sn];
+		    if(act.addtime < st) act.addtime = st;
+		    state = 1;
+		    current = &act;
+		    break; }
+		case 1: {
+		    auto del = current->deleted.find(sn);
+		    if(del == current->deleted.end()) ;
+		    else if(del->second > st) break;
+		    else current->deleted.erase(del);
+		    auto &act = current->items[sn];
+		    if(act < st) act = st;
+		    break; }
+		case 2: {
+		    auto act = current->items.find(sn);
+		    if(act == current->items.end()) ;
+		    else if(act->second >= st) break;
+		    else current->items.erase(act);
+		    auto &del = current->deleted[sn];
+		    if(del < st) del = st;
+		    break; }
+		case 3: {
+		    auto act = store.catalog_.find(sn);
+		    if(act == store.catalog_.end()) ;
+		    else if(act->second.addtime >= st) break;
+		    else store.catalog_.erase(act);
+		    auto &del = store.catalog_delete[sn];
+		    if(del < st) del = st;
+		    break; }
+		case 4:
+		    break;
+		}
+	    }
+	}
+	else if(v.is_array()) {
+	    auto &a = v.as_array();
+	    if(a.size() == 1 && a[0].is_string()) {
+		std::string c(a[0].as_string());
+		if(c == "end"s) state = 0;
+		else if(c == "delete"s) {
+		    if(state == 1 || state == 2) state = 2;
+		    else if(state == 4) ;
+		    else state = 3;
+		}
+	    }
+	}
+}
+
 void Store::loadCatalog() {
     CatalogLoader loader;
     readValues(dbDir() / "catalog.jsonl", [&loader](const json::value &v){

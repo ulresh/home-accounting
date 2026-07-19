@@ -506,7 +506,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		idxNew->dnMap[n.no] = m;
 	    }
 	}
-	outp.reset();
+	outp.reset(); // == store.saveDevices();
 	if(!peerDeviceNo) peerDeviceNo = store.knowsDevice(peer);
 	if(!peerDeviceNo) {
 	    res.error = "bad protocol"sv;
@@ -556,17 +556,20 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		part_delete = true;
 	}
 		});
+	store.savePeople();
 	idxNew->people = store.stateOf(store.pPeople());
 	DvCMD(s);
     }
     else idxNew->people = idxCur ? idxCur->people
 	    : store.stateOf(store.pPeople());
     if(cmd == "catalog"sv) {
+	CatalogIncrementLoader loader(store);
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
 		[&](const json::value &v) -> void {
-		    // TODO +++
+		    loader.add(v);
+		    ++res.received;
 		});
-	// TODO +++
+	store.saveCatalog();
 	idxNew->catalog = store.stateOf(store.pCatalog());
 	DvCMD(s);
     }

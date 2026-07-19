@@ -248,6 +248,20 @@ struct CatalogLoader {
     CategoryMap *cur = nullptr, *del = nullptr;
 };
 
+struct CatalogIncrementLoader {
+    CatalogIncrementLoader(Store &store) : store(store) {}
+    void add(const json::value &v);
+    Store &store;
+    int state = 0;
+    /* 0 - actual category
+       1 - actual item
+       2 - delete item
+       3 - delete category
+       4 - skip (in deleted category)
+     */
+    CategoryItems *current;
+};
+
 struct MonthEvents {
     MonthEvents(Store &store) : store(store) {}
     void add(const json::value &v);
