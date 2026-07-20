@@ -228,6 +228,13 @@ asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
     co_return MonthSyncData{size, std::move(header)};
 }
 
+asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
+	const Store &store, int yyyymm, const fs::path &path,
+	const MonthSyncData &peer) {
+    // TODO +++
+    co_return MonthSyncData{}; // TODO +++
+}
+
 } // namespace
 
 // ============================================================
@@ -473,7 +480,20 @@ asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
 	++res.sent;
 	if(!idxCur) idxPeer->catalog = *cur;
     }
-    // TODO +++ send all increment
+    for(auto &[yyyymm, path] : store.enumerateMonths()) {
+	auto peer = idxPeer->events.lower_bound(yyyymm);
+	if(peer == idxPeer->events.end() || peer->first != yyyymm) {
+	    if(idxCur)
+		co_await aStreamFullEventFile(s, store, yyyymm, path);
+	    else idxPeer->events.emplace_hint(peer, yyyymm,
+		co_await aStreamFullEventFile(s, store, yyyymm, path));
+	}
+	else if(idxCur)
+	    co_await aStreamEventFile(s, store, yyyymm, path, peer->second);
+	else peer->second =
+	    co_await aStreamEventFile(s, store, yyyymm, path, peer->second);
+	++res.sent;
+    }
     co_await aWrite(s, R"(["end"])" "\n"s);
 }
 
