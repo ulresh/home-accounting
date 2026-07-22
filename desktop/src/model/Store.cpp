@@ -108,6 +108,7 @@ inline json::object headerObjectFor(const Schema& s) {
 inline std::string headerLineFor(const Schema& s) {
     return json::serialize(headerObjectFor(s));
 }
+std::string Schema::serialize() const { return headerLineFor(*this); }
 inline std::string canonicalHeaderLine() {
     return headerLineFor(canonicalSchema());
 }

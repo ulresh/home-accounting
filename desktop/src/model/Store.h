@@ -101,6 +101,7 @@ struct Schema {
         return columns == o.columns && reference == o.reference;
     }
     bool operator!=(const Schema& o) const { return !(*this == o); }
+    std::string serialize() const;
 };
 
 // Манифест справочников (для обмена «состоянием» в начале сессии).

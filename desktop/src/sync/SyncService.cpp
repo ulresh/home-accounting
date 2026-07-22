@@ -235,7 +235,7 @@ asio::awaitable<void> aStreamTopEventFile(SslStream &s,
     {   json::array h;
 	h.emplace_back("event"sv);
 	h.emplace_back(yyyymm);
-	h.emplace_back(cur->offset);
+	h.emplace_back(cur.offset);
 	co_await aWriteLine(s, json::serialize(h));
     }
     std::ifstream in(path, std::ios::binary);
@@ -261,7 +261,7 @@ asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
 	const MonthSyncData &peer) {
     MonthSyncData cur;
     cur.offset = fs::file_size(path);
-    if(cur.offset <= peer.offset) return peer;
+    if(cur.offset <= peer.offset) co_return peer;
     bool first = true;
     std::ifstream in(path, std::ios::binary);
     in.seekg(peer.offset);
@@ -286,7 +286,7 @@ asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
 			{   json::array h;
 			    h.emplace_back("event"sv);
 			    h.emplace_back(yyyymm);
-			    h.emplace_back(cur->offset - peer.offset);
+			    h.emplace_back(cur.offset - peer.offset);
 			    co_await aWriteLine(s, json::serialize(h));
 			}
 		    }
@@ -295,11 +295,11 @@ asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
 	    if(first) {
 		first = false;
 		cur.header = peer.header;
-		std::string ch = json::serialize(peer.header);
+		std::string ch = peer.header.serialize() + "\n"s;
 		{   json::array h;
 		    h.emplace_back("event"sv);
 		    h.emplace_back(yyyymm);
-		    h.emplace_back(cur->offset - peer.offset + ch.size());
+		    h.emplace_back(cur.offset - peer.offset + ch.size());
 		    co_await aWriteLine(s, json::serialize(h));
 		}
 		co_await aWrite(s, ch);
@@ -311,11 +311,11 @@ asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
 	    // сюда мы гарантированно попадаем в случае когда одно событие не помещается в буфер - маловероятно на самом деле, но обработаем
 	    first = false;
 	    cur.header = peer.header;
-	    std::string ch = json::serialize(peer.header);
+	    std::string ch = peer.header.serialize() + "\n"s;
 	    {   json::array h;
 		h.emplace_back("event"sv);
 		h.emplace_back(yyyymm);
-		h.emplace_back(cur->offset - peer.offset + ch.size());
+		h.emplace_back(cur.offset - peer.offset + ch.size());
 		co_await aWriteLine(s, json::serialize(h));
 	    }
 	    co_await aWrite(s, ch);
@@ -361,7 +361,7 @@ asio::awaitable<MonthSyncData> aStreamMiddleEventFile(SslStream &s,
 	    }
 	    if(first) {
 		first = false;
-		std::string ch = json::serialize(peer.header);
+		std::string ch = peer.header.serialize() + "\n"s;
 		{   json::array h;
 		    h.emplace_back("event"sv);
 		    h.emplace_back(yyyymm);
@@ -636,7 +636,7 @@ asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
 		auto cur = idxCur->events.find(yyyymm);
 		if(cur == idxCur->events.end())
 		    // сейчас ничего не пришло
-		    idxNew[yyyymm] = co_await aStreamFullEventFile(s,
+		    idxNew->events[yyyymm] = co_await aStreamFullEventFile(s,
 			store, yyyymm, path);
 		else if(cur->second.offset)
     // сейчас было что-то получено, что не имеет смысла передавать обратно
@@ -650,7 +650,7 @@ asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
 	else if(idxCur) {
 	    auto cur = idxCur->events.find(yyyymm);
 	    if(cur == idxCur->events.end())
-		idxNew[yyyymm] = co_await aStreamEventFile(s,
+		idxNew->events[yyyymm] = co_await aStreamEventFile(s,
 			store, yyyymm, path, peer->second);
 	    else if(cur->second.offset > peer->second.offset)
 		co_await aStreamMiddleEventFile(s,
