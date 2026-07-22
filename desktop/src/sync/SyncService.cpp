@@ -201,14 +201,14 @@ asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
 	co_await aWriteLine(s, json::serialize(h));
     }
     std::ifstream in(path, std::ios::binary);
-    char block[16384];
+    MallocPtr<char> block(block_size());
     json::stream_parser sp;
     Schema header;
     while (in) {
-        in.read(block, sizeof(block));
+        in.read(block.get(), block_size());
         std::streamsize got = in.gcount();
         if (got <= 0) break;
-	char *p = block;
+	char *p = block.get();
 	auto si = got;
 	for(;;) {
 	    auto consumed = sp.write_some(p, si);
@@ -221,7 +221,8 @@ asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
 	    sp.reset();
 	    p += consumed; si -= consumed;
 	}
-        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got),
+        co_await asio::async_write(s, asio::buffer(block.get(),
+						   (std::size_t)got),
 				   asio::use_awaitable);
     }
     co_await aWrite(s, "\n"s);

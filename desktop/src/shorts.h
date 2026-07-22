@@ -22,4 +22,6 @@ namespace ha {
 	    return static_cast<T*>(p);
 	}
     };
+
+    inline std::size_t block_size() { return 64 * 1024; }
 }

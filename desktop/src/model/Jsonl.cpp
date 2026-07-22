@@ -4,9 +4,7 @@
 #include <chrono>
 #include <vector>
 #include <boost/json.hpp>
-
-namespace fs = std::filesystem;
-namespace json = boost::json;
+#include "../shorts.h"
 
 namespace ha {
 
@@ -14,16 +12,14 @@ bool readValues(const fs::path& p,
                 const std::function<void(const json::value&)>& onValue) {
     std::ifstream in(p, std::ios::binary);
     if (!in.is_open()) return false;
-
     json::stream_parser sp;
-    bool atStart = true;                  // мы на границе перед новым значением
-    std::vector<char> block(64 * 1024);
-
+    bool atStart = true; // мы на границе перед новым значением
+    MallocPtr<char> block(block_size());
     while (in) {
-        in.read(block.data(), (std::streamsize)block.size());
+        in.read(block.get(), block_size());
         std::streamsize got = in.gcount();
         if (got <= 0) break;
-        const char* p2 = block.data();
+        const char* p2 = block.get();
         std::size_t rem = (std::size_t)got;
         while (rem > 0) {
             if (atStart) {                // пропустить пробелы/переводы строк между значениями
