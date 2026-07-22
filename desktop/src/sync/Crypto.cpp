@@ -8,15 +8,7 @@
 #include <openssl/ssl.h>
 #include <stdexcept>
 #include <memory>
-
-namespace {
-struct MallocDeleter{void operator()(void*p)const{std::free(p);}};
-template<typename T> struct MallocPtr : std::unique_ptr<T, MallocDeleter> {
-    MallocPtr(std::size_t size)
-	: std::unique_ptr<T, MallocDeleter>(static_cast<T*>(std::malloc(size)), MallocDeleter{})
-    { if(!std::unique_ptr<T, MallocDeleter>::get()) throw std::bad_alloc(); }
-};
-} // namespace
+#include "../shorts.h"
 
 namespace ha::crypto {
 
