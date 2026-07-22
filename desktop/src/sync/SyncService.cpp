@@ -229,11 +229,156 @@ asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
     co_return MonthSyncData{size, std::move(header)};
 }
 
+asio::awaitable<void> aStreamTopEventFile(SslStream &s,
+	const Store &store, int yyyymm, const fs::path &path,
+	const MonthSyncData &cur) {
+    {   json::array h;
+	h.emplace_back("event"sv);
+	h.emplace_back(yyyymm);
+	h.emplace_back(cur->offset);
+	co_await aWriteLine(s, json::serialize(h));
+    }
+    std::ifstream in(path, std::ios::binary);
+    MallocPtr<char> block(block_size());
+    uint64_t rest = cur.offset;
+    while(in) {
+        in.read(block.get(), block_size());
+        std::streamsize got = in.gcount();
+        if(got <= 0) break;
+	if(got > rest) got = rest;
+        co_await asio::async_write(s, asio::buffer(block.get(),
+						   (std::size_t)got),
+				   asio::use_awaitable);
+	rest -= got;
+	if(!rest) break;
+    }
+    if(rest) throw std::runtime_error("bad data"s);
+    co_await aWrite(s, "\n"s);
+}
+
 asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
 	const Store &store, int yyyymm, const fs::path &path,
 	const MonthSyncData &peer) {
-    // TODO +++
-    co_return MonthSyncData{}; // TODO +++
+    MonthSyncData cur;
+    cur.offset = fs::file_size(path);
+    if(cur.offset <= peer.offset) return peer;
+    bool first = true;
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(peer.offset);
+    MallocPtr<char> block(block_size());
+    json::stream_parser sp;
+    while (in) {
+        in.read(block.get(), block_size());
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+	char *p = block.get();
+	auto si = got;
+	for(;;) {
+	    auto consumed = sp.write_some(p, si);
+	    if(!sp.done()) break;
+	    auto v = sp.release();
+            if(v.is_object()) {
+                auto &o = v.as_object();
+                if(o.if_contains("header")) {
+		    cur.header = Schema(o);
+		    if(first) {
+			first = false;
+			{   json::array h;
+			    h.emplace_back("event"sv);
+			    h.emplace_back(yyyymm);
+			    h.emplace_back(cur->offset - peer.offset);
+			    co_await aWriteLine(s, json::serialize(h));
+			}
+		    }
+		}
+	    }
+	    if(first) {
+		first = false;
+		cur.header = peer.header;
+		std::string ch = json::serialize(peer.header);
+		{   json::array h;
+		    h.emplace_back("event"sv);
+		    h.emplace_back(yyyymm);
+		    h.emplace_back(cur->offset - peer.offset + ch.size());
+		    co_await aWriteLine(s, json::serialize(h));
+		}
+		co_await aWrite(s, ch);
+	    }
+	    sp.reset();
+	    p += consumed; si -= consumed;
+	}
+	if(first) {
+	    // сюда мы гарантированно попадаем в случае когда одно событие не помещается в буфер - маловероятно на самом деле, но обработаем
+	    first = false;
+	    cur.header = peer.header;
+	    std::string ch = json::serialize(peer.header);
+	    {   json::array h;
+		h.emplace_back("event"sv);
+		h.emplace_back(yyyymm);
+		h.emplace_back(cur->offset - peer.offset + ch.size());
+		co_await aWriteLine(s, json::serialize(h));
+	    }
+	    co_await aWrite(s, ch);
+	}
+        co_await asio::async_write(s, asio::buffer(block.get(),
+						   (std::size_t)got),
+				   asio::use_awaitable);
+    }
+    co_await aWrite(s, "\n"s);
+    co_return cur;
+}
+
+asio::awaitable<MonthSyncData> aStreamMiddleEventFile(SslStream &s,
+	const Store &store, int yyyymm, const fs::path &path,
+	const MonthSyncData &peer, const MonthSyncData &cur) {
+    bool first = true;
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(peer.offset);
+    MallocPtr<char> block(block_size());
+    json::stream_parser sp;
+    uint64_t rest = cur.offset - peer.offset;
+    while (in) {
+        in.read(block.get(), block_size());
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+	if(got > rest) got = rest;
+	if(first) {
+	    sp.write_some(block.get(), got);
+	    if(sp.done()) {
+		auto v = sp.release();
+		if(v.is_object()) {
+		    auto &o = v.as_object();
+		    if(o.if_contains("header")) {
+			first = false;
+			{   json::array h;
+			    h.emplace_back("event"sv);
+			    h.emplace_back(yyyymm);
+			    h.emplace_back(rest);
+			    co_await aWriteLine(s, json::serialize(h));
+			}
+		    }
+		}
+	    }
+	    if(first) {
+		first = false;
+		std::string ch = json::serialize(peer.header);
+		{   json::array h;
+		    h.emplace_back("event"sv);
+		    h.emplace_back(yyyymm);
+		    h.emplace_back(rest + ch.size());
+		    co_await aWriteLine(s, json::serialize(h));
+		}
+		co_await aWrite(s, ch);
+	    }
+	}
+        co_await asio::async_write(s, asio::buffer(block.get(),
+						   (std::size_t)got),
+				   asio::use_awaitable);
+	rest -= got;
+	if(!rest) break;
+    }
+    if(rest) throw std::runtime_error("bad data"s);
+    co_await aWrite(s, "\n"s);
 }
 
 } // namespace
@@ -452,7 +597,9 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 
 asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
 	const std::string &peer, SyncResult &res,
-	SyncIndex *idxPeer, SyncIndex *idxCur) {
+	SyncIndex *idxPeer, SyncIndex *idxCur, SyncIndex *idxNew) {
+    // В idxNew записать всё, что не попало в idxCur
+    // А туда не попадут те файлы, для которых у собеседника нет изменений
     FileState tmp, *cur;
     if(idxCur) cur = &idxCur->device; else {
 	tmp = store.stateOf(store.pDevice());
@@ -484,13 +631,31 @@ asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
     for(auto &[yyyymm, path] : store.enumerateMonths()) {
 	auto peer = idxPeer->events.lower_bound(yyyymm);
 	if(peer == idxPeer->events.end() || peer->first != yyyymm) {
-	    if(idxCur)
-		co_await aStreamFullEventFile(s, store, yyyymm, path);
+	    // раньше ничего не передавали
+	    if(idxCur) {
+		auto cur = idxCur->events.find(yyyymm);
+		if(cur == idxCur->events.end())
+		    // сейчас ничего не пришло
+		    idxNew[yyyymm] = co_await aStreamFullEventFile(s,
+			store, yyyymm, path);
+		else if(cur->second.offset)
+    // сейчас было что-то получено, что не имеет смысла передавать обратно
+		    co_await aStreamTopEventFile(s,
+			store, yyyymm, path, cur->second);
+		// если нашли в idxCur, то в idxNew он тоже есть, а кроме того aStreamFullEventFile ограничиваем по размеру, значит он вернёт непоследний заголовок
+	    }
 	    else idxPeer->events.emplace_hint(peer, yyyymm,
 		co_await aStreamFullEventFile(s, store, yyyymm, path));
 	}
-	else if(idxCur)
-	    co_await aStreamEventFile(s, store, yyyymm, path, peer->second);
+	else if(idxCur) {
+	    auto cur = idxCur->events.find(yyyymm);
+	    if(cur == idxCur->events.end())
+		idxNew[yyyymm] = co_await aStreamEventFile(s,
+			store, yyyymm, path, peer->second);
+	    else if(cur->second.offset > peer->second.offset)
+		co_await aStreamMiddleEventFile(s,
+			store, yyyymm, path, peer->second, cur->second);
+	}
 	else peer->second =
 	    co_await aStreamEventFile(s, store, yyyymm, path, peer->second);
 	++res.sent;
@@ -673,7 +838,7 @@ asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, Syn
 		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
 					     &idx);
 	    else co_await aSendAllIncrement(*stream, d.store, peer, res,
-					    &idx, nullptr);
+					    &idx, nullptr, nullptr);
 	    DCMD(*stream);
 	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
 			rbuf, ao, cmd, peerDeviceNo, nullptr, &idx))
@@ -771,7 +936,7 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 			rbuf, ao, cmd, peerDeviceNo, &idxCur, &idxNew))
 		co_return;
 	    co_await aSendAllIncrement(*stream, d.store, peer, res,
-				       &idxOld, &idxCur);
+				       &idxOld, &idxCur, &idxNew);
 	    CMD(*stream);
 	    if(cmd != "done"sv) {
 		res.error = "bad protocol"sv;
