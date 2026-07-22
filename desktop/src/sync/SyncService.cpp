@@ -761,11 +761,23 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     }
     else idxNew->catalog = idxCur ? idxCur->catalog
 	    : store.stateOf(store.pCatalog());
-    // TODO +++ recv all increment
+    while(cmd == "event"sv) {
+	int yyyymm = ao->at(1).as_uint64();
+	// TODO +++
+	co_await aReadSizedJson(s, rbuf, ao->at(2).as_uint64(),
+		[&](const json::value &v) -> void {
+	// TODO +++
+		    ++res.received;
+		});
+	// TODO +++
+	DvCMD(s);
     // TODO +++ не забыть почистить дубликаты в event
-    // TODO +++ idxCur -> idxNew для отсутствующих на приёме
-    // TODO +++ recv "[\"end\"]\n"
-    // TODO +++
+    // TODO +++ idxCur -> idxNew для отсутствующих на приёме ???
+    }
+    if(cmd != "end"sv) {
+	res.error = "bad protocol"sv;
+	co_return false;
+    }
     co_return true;
 }
 
