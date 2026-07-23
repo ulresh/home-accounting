@@ -763,12 +763,50 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    : store.stateOf(store.pCatalog());
     while(cmd == "event"sv) {
 	int yyyymm = ao->at(1).as_uint64();
-	// TODO +++
-	co_await aReadSizedJson(s, rbuf, ao->at(2).as_uint64(),
+	{   auto p = store.monthPath(yyyymm);
+	    if(p.has_parent_path()) fs::create_directories(p.parent_path());
+	    std::ofstream out(p, std::ios::binary | std::ios::app);
+	    if(!out) { res.error = "file error"sv; co_return false; }
+	    bool canonical;
+	    if(auto p = out.tellp()) {
+		if(idxCur)
+		    // Заголовок в idxCur не используется
+		    idxCur->events[yyyymm].offset = p;
+		canonical = store.canonicalSchemaMonths_.contains(yyyymm);
+	    }
+	    else canonical = false;
+	    Schema header;
+	    co_await aReadSizedJson(s, rbuf, ao->at(2).as_uint64(),
 		[&](const json::value &v) -> void {
+    if (v.is_object()) {
+	auto& o = v.as_object();
+	if (o.if_contains("header")) header = Schema(o);
+	else if (!header) ;
+	else if (auto* del = o.if_contains("delete")) {
+	    RecRef t = Store::parseRef(del->as_array(), header.reference);
+	    /* TODO +++
+	    applyDeleteFromLoad(monthEvents, t);
+	    if(auto *edit = o.if_contains("this"))
+		store.read_last_edit(Store::parseRef(edit->as_array(),
+					header.reference));
+	    */
+	}
+    }
+    else if (!header) ;
+    else if (v.is_array()) {
+	Event *ep;
+	    /* TODO +++
+	monthEvents.emplace_back(ep = parseEventArray(
+				v.as_array(), header));
+	store.read_last_edit(*ep);
+	    */
+    }
+	// TODO +++ write header if !current version
+	// TODO +++
 	// TODO +++
 		    ++res.received;
 		});
+	}
 	// TODO +++
 	DvCMD(s);
     // TODO +++ не забыть почистить дубликаты в event
@@ -943,7 +981,7 @@ asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, 
 		d.store.loadSyncIndex(peerDeviceNo, idxOld);
 		idxNew.dnMap = idxOld.dnMap;
 	    }
-	    d.store.listManifest(idxCur); // TODO +++ manifest -> full
+	    d.store.listManifest(idxCur); // events заполнит Recv
 	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
 			rbuf, ao, cmd, peerDeviceNo, &idxCur, &idxNew))
 		co_return;

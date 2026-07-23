@@ -149,7 +149,8 @@ static Event *parseEventArray(const json::array& a, const Schema& s) {
     return eh.release();
 }
 
-static RecRef parseRef(const json::array& a, const std::vector<std::string>& ref) {
+RecRef Store::parseRef(const json::array& a,
+		       const std::vector<std::string>& ref) {
     RecRef r;
     for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
         if      (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
@@ -509,10 +510,10 @@ void MonthEvents::add(const json::value &v) {
 	if (o.if_contains("header")) header = schemaFromHeader(o);
 	else if (!header) ;
 	else if (auto* del = o.if_contains("delete")) {
-	    RecRef t = parseRef(del->as_array(), header.reference);
+	    RecRef t = Store::parseRef(del->as_array(), header.reference);
 	    applyDeleteFromLoad(monthEvents, t);
 	    if(auto *edit = o.if_contains("this"))
-		store.read_last_edit(parseRef(edit->as_array(),
+		store.read_last_edit(Store::parseRef(edit->as_array(),
 					header.reference));
 	}
     }

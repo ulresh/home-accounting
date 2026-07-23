@@ -225,6 +225,9 @@ public:
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
+    static RecRef parseRef(const json::array& a,
+			   const std::vector<std::string>& ref);
+
     std::filesystem::path root_;
     std::string db_ = "Основная";
     int deviceNo_ = 0;
