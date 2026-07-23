@@ -763,16 +763,19 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    : store.stateOf(store.pCatalog());
     while(cmd == "event"sv) {
 	int yyyymm = ao->at(1).as_uint64();
-	{   auto p = store.monthPath(yyyymm);
-	    if(p.has_parent_path()) fs::create_directories(p.parent_path());
-	    std::ofstream out(p, std::ios::binary | std::ios::app);
+	{   auto path = store.monthPath(yyyymm);
+	    if(path.has_parent_path())
+		fs::create_directories(path.parent_path());
+	    std::ofstream out(path, std::ios::binary | std::ios::app);
 	    if(!out) { res.error = "file error"sv; co_return false; }
 	    bool canonical;
-	    if(auto p = out.tellp()) {
+	    MonthDeletions mdels;
+	    if(auto pos = out.tellp()) {
 		if(idxCur)
 		    // Заголовок в idxCur не используется
-		    idxCur->events[yyyymm].offset = p;
-		canonical = store.canonicalSchemaMonths_.contains(yyyymm);
+		    idxCur->events[yyyymm].offset = pos;
+		// canonical = store.canonicalSchemaMonths_.contains(yyyymm);
+		if(!mdels.read(path, canonical, res.error)) co_return false;
 	    }
 	    else canonical = false;
 	    Schema header;
@@ -784,6 +787,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	else if (!header) ;
 	else if (auto* del = o.if_contains("delete")) {
 	    RecRef t = Store::parseRef(del->as_array(), header.reference);
+	// TODO +++ dnMap
 	    /* TODO +++
 	    applyDeleteFromLoad(monthEvents, t);
 	    if(auto *edit = o.if_contains("this"))
@@ -794,6 +798,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     }
     else if (!header) ;
     else if (v.is_array()) {
+	// TODO +++ dnMap
 	Event *ep;
 	    /* TODO +++
 	monthEvents.emplace_back(ep = parseEventArray(

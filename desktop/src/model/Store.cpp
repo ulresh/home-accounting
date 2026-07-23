@@ -575,7 +575,8 @@ void Store::ensureCanonicalHeader(int yyyymm) {
     }
 }
 
-bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update) {
+void Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
+			const Event *update) {
     std::string stamp = nowStamp();
     int ym = yyyymmOf(tgtEdit);
     int rn = allocRecNo(stamp, ym);
@@ -585,9 +586,14 @@ bool Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool u
     json::array ths; ths.emplace_back(jv(stamp)); ths.emplace_back(rn); ths.emplace_back(deviceNo_);
     o["delete"] = std::move(del);
     o["this"]   = std::move(ths);
-    if (update) o["update"] = true;
+    if(update) {
+	json::array upd;
+	upd.emplace_back(jv(update->edit_datetime));
+	upd.emplace_back(update->rec_no);
+	upd.emplace_back(update->dev_no);
+	o["update"] = std::move(upd);
+    }
     appendToMonth(ym, json::serialize(o));
-    return true;
 }
 
 Event &Store::addEvent(const std::string& event_datetime,
@@ -614,7 +620,7 @@ Event &Store::addEvent(const std::string& event_datetime,
 }
 
 void Store::deleteEvent(const std::shared_ptr<Event> &e) {
-    writeDelete(e->edit_datetime, e->rec_no, e->dev_no, false);
+    writeDelete(e->edit_datetime, e->rec_no, e->dev_no, nullptr);
     events_.erase(e);
 }
 
@@ -623,9 +629,11 @@ Event Store::editEvent(const std::shared_ptr<Event> &oldEv,
                        const std::string& subject, double cost,
                        const std::string &people, const std::string &volume,
                        const std::string &comment) {
-    writeDelete(oldEv->edit_datetime, oldEv->rec_no, oldEv->dev_no, true);
     events_.erase(oldEv);
-    return addEvent(event_datetime, subject, cost, people, volume, comment);
+    auto e =
+	addEvent(event_datetime, subject, cost, people, volume, comment);
+    writeDelete(oldEv->edit_datetime, oldEv->rec_no, oldEv->dev_no, &e);
+    return e;
 }
 
 void Store::addPerson(const std::string& name) {
@@ -863,6 +871,26 @@ void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
         content << json::serialize(a) << "\n";
     }
     writeAtomic(syncIndexPath(peerDn), content.str());
+}
+
+bool MonthDeletions::read(fs::path p, bool &canonical, std::string &error) {
+    Schema header;
+    readValues(p, [&](const json::value& v){
+	if (v.is_object()) {
+	    auto& o = v.as_object();
+	    if (o.if_contains("header")) header = schemaFromHeader(o);
+	    else if (!header) ;
+	    else if (auto* del = o.if_contains("delete")) {
+		RecRef d = Store::parseRef(del->as_array(),
+					   header.reference);
+		if(auto *edit = o.if_contains("this"))
+		    RecRef t = Store::parseRef(edit->as_array(),
+					       header.reference);
+		// TODO +++
+	    }
+	}
+    });
+    return true;
 }
 
 } // namespace ha

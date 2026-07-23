@@ -220,8 +220,9 @@ public:
     void appendToMonth(int yyyymm, const std::string& line);
     // Перед записью НАШЕЙ строки убедиться, что действует наша каноническая схема.
     void ensureCanonicalHeader(int yyyymm);
-    // Записать строку удаления (target + this + флаг update). Уважает дедуп.
-    bool writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn, bool update);
+    // Записать строку удаления (target + this + update).
+    void writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
+		     const Event *update);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
@@ -273,6 +274,10 @@ struct MonthEvents {
     Store &store;
     Schema header;
     Store::TempEvents monthEvents;
+};
+
+struct MonthDeletions {
+    bool read(fs::path p, bool &canonical, std::string &error);
 };
 
 } // namespace ha
