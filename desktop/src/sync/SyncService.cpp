@@ -576,7 +576,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 	    co_await aReadSizedJson(s, rbuf,
 				    ao->at(2).as_uint64(),
 		[&m,&out,&res](const json::value &v) -> void {
-		    out << json::serialize(v) << '\n';
+		    out << json::serialize(v) << std::endl;
 		    m.add(v);
 		    ++res.received;
 		});
@@ -775,7 +775,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		    // Заголовок в idxCur не используется
 		    idxCur->events[yyyymm].offset = pos;
 		// canonical = store.canonicalSchemaMonths_.contains(yyyymm);
-		if(!mdels.read(path, canonical, res.error)) co_return false;
+		mdels.read(path, canonical);
 	    }
 	    else canonical = false;
 	    Schema header;
@@ -784,22 +784,28 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     if (v.is_object()) {
 	auto& o = v.as_object();
 	if (o.if_contains("header")) header = Schema(o);
-	else if (!header) ;
-	else if (auto* del = o.if_contains("delete")) {
-	    RecRef t = Store::parseRef(del->as_array(), header.reference);
+	else if (!header) return;
+	else if (auto* del = o.if_contains("delete"))
+	    if(auto *ths = o.if_contains("this")) {
 	// TODO +++ dnMap
-	    /* TODO +++
-	    applyDeleteFromLoad(monthEvents, t);
-	    if(auto *edit = o.if_contains("this"))
-		store.read_last_edit(Store::parseRef(edit->as_array(),
-					header.reference));
-	    */
+	RecRef d = Store::parseRef(del->as_array(), header.reference);
+	RecRef t = Store::parseRef(ths->as_array(), header.reference);
+	if(t.dev_no == store.deviceNo()) return;
+	RecRef u;
+	if(auto *upd = o.if_contains("update"))
+	    u = Store::parseRef(upd->as_array(), header.reference);
+	MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
+	if(!mdels.ops.contains(op)) {
+	    out << json::serialize(v) << std::endl;
+	    // TODO +++ applyDeleteFromLoad(monthEvents, d);
 	}
+	    }
     }
-    else if (!header) ;
+    else if (!header) return;
     else if (v.is_array()) {
 	// TODO +++ dnMap
 	Event *ep;
+	// if(ep->dev_no == store.deviceNo()) return;
 	    /* TODO +++
 	monthEvents.emplace_back(ep = parseEventArray(
 				v.as_array(), header));
@@ -821,6 +827,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	res.error = "bad protocol"sv;
 	co_return false;
     }
+	// TODO +++ done ???
     co_return true;
 }
 

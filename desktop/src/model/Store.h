@@ -277,7 +277,15 @@ struct MonthEvents {
 };
 
 struct MonthDeletions {
-    bool read(fs::path p, bool &canonical, std::string &error);
+    struct Op {
+	RecRef del, ths, upd;
+	bool operator < (const Op &rhs) const {
+	    return del < rhs.del || (del == rhs.del &&
+		(ths < rhs.ths || (ths == rhs.ths && upd < rhs.upd)));
+	}
+    };
+    void read(fs::path p, bool &canonical);
+    std::set<Op> ops;
 };
 
 } // namespace ha

@@ -8,7 +8,19 @@
 
 namespace ha {
 
-struct RecRef { std::string edit_datetime; int rec_no = 0; int dev_no = 0; };
+struct RecRef {
+    bool operator < (const RecRef &rhs) const {
+	return edit_datetime < rhs.edit_datetime ||
+	    (edit_datetime == rhs.edit_datetime &&
+	     (rec_no < rhs.rec_no || (rec_no == rhs.rec_no &&
+		dev_no < rhs.dev_no)));
+    }
+    bool operator == (const RecRef &rhs) const {
+	return edit_datetime == rhs.edit_datetime &&
+	    rec_no == rhs.rec_no && dev_no == rhs.dev_no;
+    }
+    std::string edit_datetime; int rec_no = 0; int dev_no = 0;
+};
 
 // Одно событие (трата/покупка). Идентичность записи в системе:
 // (edit_datetime, rec_no, dev_no). Эти три поля неизменны.

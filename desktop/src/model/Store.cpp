@@ -510,8 +510,8 @@ void MonthEvents::add(const json::value &v) {
 	if (o.if_contains("header")) header = schemaFromHeader(o);
 	else if (!header) ;
 	else if (auto* del = o.if_contains("delete")) {
-	    RecRef t = Store::parseRef(del->as_array(), header.reference);
-	    applyDeleteFromLoad(monthEvents, t);
+	    RecRef d = Store::parseRef(del->as_array(), header.reference);
+	    applyDeleteFromLoad(monthEvents, d);
 	    if(auto *edit = o.if_contains("this"))
 		store.read_last_edit(Store::parseRef(edit->as_array(),
 					header.reference));
@@ -873,24 +873,25 @@ void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
     writeAtomic(syncIndexPath(peerDn), content.str());
 }
 
-bool MonthDeletions::read(fs::path p, bool &canonical, std::string &error) {
+void MonthDeletions::read(fs::path p, bool &canonical) {
     Schema header;
     readValues(p, [&](const json::value& v){
 	if (v.is_object()) {
 	    auto& o = v.as_object();
 	    if (o.if_contains("header")) header = schemaFromHeader(o);
 	    else if (!header) ;
-	    else if (auto* del = o.if_contains("delete")) {
-		RecRef d = Store::parseRef(del->as_array(),
-					   header.reference);
-		if(auto *edit = o.if_contains("this"))
-		    RecRef t = Store::parseRef(edit->as_array(),
-					       header.reference);
-		// TODO +++
-	    }
+	    else if (auto* del = o.if_contains("delete"))
+		if(auto *ths = o.if_contains("this")) {
+	RecRef d = Store::parseRef(del->as_array(), header.reference);
+	RecRef t = Store::parseRef(ths->as_array(), header.reference);
+	RecRef u;
+	if(auto *upd = o.if_contains("update"))
+	    u = Store::parseRef(upd->as_array(), header.reference);
+	ops.insert({d,t,u});
+		}
 	}
     });
-    return true;
+    canonical = (header == canonicalSchema());
 }
 
 } // namespace ha
