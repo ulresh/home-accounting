@@ -221,6 +221,9 @@ public:
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
+    static std::string eventToLine(const Event& e);
+    static Event *parseEventArray(const json::array& a, const Schema& s,
+				  const SyncIndex *idx = nullptr);
     static RecRef parseRef(const json::array& a,
 			   const std::vector<std::string>& ref,
 			   const SyncIndex *idx = nullptr);

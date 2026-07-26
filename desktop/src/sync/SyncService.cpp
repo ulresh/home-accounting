@@ -806,22 +806,20 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     }
     else if (!header) return;
     else if (v.is_array()) {
-	// TODO +++ dnMap
 	Event *ep;
-	// if(ep->dev_no == store.deviceNo()) return;
-	    /* TODO +++
-	monthEvents.emplace_back(ep = parseEventArray(
-				v.as_array(), header));
-	store.read_last_edit(*ep);
-	    */
+	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
+			v.as_array(), header, idxNew));
+	if(ep->dev_no == store.deviceNo()) return;
+	// TODO +++ дубли
+	store.events_.insert(eh);
+	if(!canonical) {
+	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
+	out << Store::eventToLine(*ep) << std::endl;
     }
-	// TODO +++ write header if !current version
-	// TODO +++
-	// TODO +++
 		    ++res.received;
 		});
+	    idxNew->events[yyyymm].offset = out.tellp();
 	}
-	// TODO +++
 	DvCMD(s);
     // TODO +++ не забыть почистить дубликаты в event
     // TODO +++ idxCur -> idxNew для отсутствующих на приёме ???

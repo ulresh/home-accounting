@@ -130,7 +130,8 @@ static Schema schemaFromHeader(const json::object& o) { return Schema(o); }
 static Schema schemaFromHeaderNodefault(const json::object& o) {
     return Schema(o, false); }
 
-static Event *parseEventArray(const json::array& a, const Schema& s) {
+Event *Store::parseEventArray(const json::array& a, const Schema& s,
+			      const SyncIndex *idx) {
     Event* ep;
     std::unique_ptr<Event> eh(ep = new Event);
     for (size_t i = 0; i < s.columns.size() && i < a.size(); ++i) {
@@ -141,7 +142,13 @@ static Event *parseEventArray(const json::array& a, const Schema& s) {
         else if (c == "cost")           ep->cost = asNum(v);
         else if (c == "edit_datetime")  ep->edit_datetime = asStr(v);
         else if (c == "rec_no")         ep->rec_no = asInt(v);
-        else if (c == "dev_no")         ep->dev_no = asInt(v);
+        else if (c == "dev_no") {
+	    ep->dev_no = asInt(v);
+	    if(idx) {
+		auto p = idx->dnMap.find(ep->dev_no);
+		if(p != idx->dnMap.end()) ep->dev_no = p->second;
+	    }
+	}
         else if (c == "people")  ep->people  = asStr(v);
         else if (c == "volume")  ep->volume  = asStr(v);
         else if (c == "comment") ep->comment = asStr(v);
@@ -187,7 +194,7 @@ RecRefDel Store::parseRefDel(const json::array& a,
 }
 
 // каноническая сериализация НАШЕГО события (с обрезкой хвостовых null).
-static std::string eventToLine(const Event& e) {
+std::string Store::eventToLine(const Event& e) {
     std::ostringstream os;
     os << '[' << json::serialize(jv(e.event_datetime)) << ','
        << json::serialize(jv(e.subject)) << ','
@@ -542,7 +549,7 @@ void MonthEvents::add(const json::value &v) {
     else if (!header) ;
     else if (v.is_array()) {
 	Event *ep;
-	monthEvents.emplace_back(ep = parseEventArray(
+	monthEvents.emplace_back(ep = Store::parseEventArray(
 				v.as_array(), header));
 	store.read_last_edit(*ep);
     }
