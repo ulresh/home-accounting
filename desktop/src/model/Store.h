@@ -11,16 +11,17 @@
 
 namespace ha {
 
-inline bool compareEvents(const std::shared_ptr<Event> &a,
-		   const std::shared_ptr<Event> &b) {
-    return a->event_datetime < b->event_datetime ||
-	(a->event_datetime == b->event_datetime &&
-	 (a->edit_datetime < b->edit_datetime ||
-	  (a->edit_datetime == b->edit_datetime &&
-	   (a->rec_no < b->rec_no ||
-	    (a->rec_no == b->rec_no &&
+#define CE \
+    return a->event_datetime < b->event_datetime || \
+	(a->event_datetime == b->event_datetime && \
+	 (a->edit_datetime < b->edit_datetime || \
+	  (a->edit_datetime == b->edit_datetime && \
+	   (a->rec_no < b->rec_no || \
+	    (a->rec_no == b->rec_no && \
 	     a->dev_no < b->dev_no)))));
-}
+
+inline bool compareEvents(const std::shared_ptr<Event> &a,
+			  const std::shared_ptr<Event> &b) { CE }
 inline bool compareEventChar(const std::shared_ptr<Event> &a,
 			     const char *b) {
     auto s = a->event_datetime.size();
@@ -43,20 +44,11 @@ inline bool compareCharEvent(const char *a,
 struct CompareEventsSet {
     using is_transparent = void;
     bool operator()(const std::shared_ptr<Event> &a,
-		    const std::shared_ptr<Event> &b) const {
-	return compareEvents(a, b);
-    }
+		    const std::shared_ptr<Event> &b) const { CE }
     bool operator()(const std::shared_ptr<Event> &a,
-		    const char *b) const {
-	return compareEventChar(a, b);
-    }
-    bool operator()(const char *a,
-		    const std::shared_ptr<Event> &b) const {
-	return compareCharEvent(a, b);
-    }
-};
-
-struct CompareYyyyMm {
+		    const RecRefDel *b) const { CE }
+    bool operator()(const RecRefDel *a,
+		    const std::shared_ptr<Event> &b) const { CE }
     bool operator()(const std::shared_ptr<Event> &a,
 		    const char *b) const {
 	return compareEventChar(a, b);
@@ -222,14 +214,17 @@ public:
     void ensureCanonicalHeader(int yyyymm);
     void writeCanonicalHeader(int yyyymm, std::ofstream &out);
     // Записать строку удаления (target + this + update).
-    void writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
-		     const Event *update);
-    void writeDelete(std::ofstream &out, const RecRef &d,
+    void writeDelete(const std::string& tgtEvent, const std::string& tgtEdit,
+		     int tgtRn, int tgtDn, const Event *update = nullptr);
+    void writeDelete(std::ofstream &out, const RecRefDel &d,
 		     const RecRef &t, const RecRef &u);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
     static RecRef parseRef(const json::array& a,
+			   const std::vector<std::string>& ref,
+			   const SyncIndex *idx = nullptr);
+    static RecRefDel parseRefDel(const json::array& a,
 			   const std::vector<std::string>& ref,
 			   const SyncIndex *idx = nullptr);
 
@@ -282,7 +277,8 @@ struct MonthEvents {
 
 struct MonthDeletions {
     struct Op {
-	RecRef del, ths, upd;
+	RecRefDel del;
+	RecRef ths, upd;
 	bool operator < (const Op &rhs) const {
 	    return del < rhs.del || (del == rhs.del &&
 		(ths < rhs.ths || (ths == rhs.ths && upd < rhs.upd)));

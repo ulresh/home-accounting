@@ -21,6 +21,9 @@ struct RecRef {
     }
     std::string edit_datetime; int rec_no = 0; int dev_no = 0;
 };
+struct RecRefDel : RecRef {
+    std::string event_datetime;
+};
 
 // Одно событие (трата/покупка). Идентичность записи в системе:
 // (edit_datetime, rec_no, dev_no). Эти три поля неизменны.

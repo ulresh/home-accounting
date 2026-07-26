@@ -94,7 +94,7 @@ FileState Store::stateOf(const fs::path& p) {
 static Schema canonicalSchema() { // TODO +++ constexpr?
     return Schema{
         {"event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"},
-        {"edit_datetime","rec_no","dev_no"}};
+        {"edit_datetime","rec_no","dev_no","event_datetime"}};
 }
 inline json::object headerObjectFor(const Schema& s) {
     json::object o;
@@ -166,9 +166,24 @@ RecRef Store::parseRef(const json::array& a,
     }
     return r;
 }
-static int refIndexOfDn(const std::vector<std::string>& ref) {
-    for (size_t i = 0; i < ref.size(); ++i) if (ref[i] == "dev_no") return (int)i;
-    return -1;
+
+RecRefDel Store::parseRefDel(const json::array& a,
+		       const std::vector<std::string>& ref,
+		       const SyncIndex *idx) {
+    RecRefDel r;
+    for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
+        if     (ref[i] == "event_datetime") r.event_datetime = asStr(a[i]);
+        else if (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
+        else if (ref[i] == "rec_no")        r.rec_no = asInt(a[i]);
+        else if (ref[i] == "dev_no") {
+	    r.dev_no = asInt(a[i]);
+	    if(idx) {
+		auto p = idx->dnMap.find(r.dev_no);
+		if(p != idx->dnMap.end()) r.dev_no = p->second;
+	    }
+	}
+    }
+    return r;
 }
 
 // каноническая сериализация НАШЕГО события (с обрезкой хвостовых null).
@@ -586,32 +601,35 @@ void Store::writeCanonicalHeader(int yyyymm, std::ofstream &out) {
     canonicalSchemaMonths_.insert(yyyymm);
 }
 
-void Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
+void Store::writeDelete(const std::string& tgtEvent,
+			const std::string& tgtEdit, int tgtRn, int tgtDn,
 			const Event *update) {
     std::string stamp = nowStamp();
     int ym = yyyymmOf(tgtEdit);
     int rn = allocRecNo(stamp, ym);
     ensureCanonicalHeader(ym);
     json::object o;
-    json::array del; del.emplace_back(jv(tgtEdit)); del.emplace_back(tgtRn); del.emplace_back(tgtDn);
-    json::array ths; ths.emplace_back(jv(stamp)); ths.emplace_back(rn); ths.emplace_back(deviceNo_);
+    json::array del; del.emplace_back(jv(tgtEdit));
+    del.emplace_back(tgtRn); del.emplace_back(tgtDn);
+    del.emplace_back(jv(tgtEvent));
+    json::array ths; ths.emplace_back(jv(stamp));
+    ths.emplace_back(rn); ths.emplace_back(deviceNo_);
     o["delete"] = std::move(del);
     o["this"]   = std::move(ths);
     if(update) {
-	json::array upd;
-	upd.emplace_back(jv(update->edit_datetime));
-	upd.emplace_back(update->rec_no);
-	upd.emplace_back(update->dev_no);
+	json::array upd; upd.emplace_back(jv(update->edit_datetime));
+	upd.emplace_back(update->rec_no); upd.emplace_back(update->dev_no);
 	o["update"] = std::move(upd);
     }
     appendToMonth(ym, json::serialize(o));
 }
 
-void Store::writeDelete(std::ofstream &out, const RecRef &d,
+void Store::writeDelete(std::ofstream &out, const RecRefDel &d,
 			const RecRef &t, const RecRef &u) {
     json::object o;
     json::array del; del.emplace_back(jv(d.edit_datetime));
     del.emplace_back(d.rec_no); del.emplace_back(d.dev_no);
+    del.emplace_back(jv(d.event_datetime));
     json::array ths; ths.emplace_back(jv(t.edit_datetime));
     ths.emplace_back(t.rec_no); ths.emplace_back(t.dev_no);
     o["delete"] = std::move(del);
@@ -648,7 +666,7 @@ Event &Store::addEvent(const std::string& event_datetime,
 }
 
 void Store::deleteEvent(const std::shared_ptr<Event> &e) {
-    writeDelete(e->edit_datetime, e->rec_no, e->dev_no, nullptr);
+    writeDelete(e->event_datetime, e->edit_datetime, e->rec_no, e->dev_no);
     events_.erase(e);
 }
 
@@ -660,7 +678,8 @@ Event Store::editEvent(const std::shared_ptr<Event> &oldEv,
     events_.erase(oldEv);
     auto e =
 	addEvent(event_datetime, subject, cost, people, volume, comment);
-    writeDelete(oldEv->edit_datetime, oldEv->rec_no, oldEv->dev_no, &e);
+    writeDelete(oldEv->event_datetime, oldEv->edit_datetime,
+		oldEv->rec_no, oldEv->dev_no, &e);
     return e;
 }
 
@@ -910,7 +929,7 @@ void MonthDeletions::read(fs::path p, bool &canonical) {
 	    else if (!header) ;
 	    else if (auto* del = o.if_contains("delete"))
 		if(auto *ths = o.if_contains("this")) {
-	RecRef d = Store::parseRef(del->as_array(), header.reference);
+	auto d = Store::parseRefDel(del->as_array(), header.reference);
 	RecRef t = Store::parseRef(ths->as_array(), header.reference);
 	RecRef u;
 	if(auto *upd = o.if_contains("update"))

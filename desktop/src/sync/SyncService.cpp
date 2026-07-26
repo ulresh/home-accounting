@@ -787,7 +787,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	else if (!header) return;
 	else if (auto* del = o.if_contains("delete"))
 	    if(auto *ths = o.if_contains("this")) {
-    RecRef d = Store::parseRef(del->as_array(), header.reference, idxNew);
+    RecRefDel d = Store::parseRefDel(del->as_array(),
+				     header.reference, idxNew);
     RecRef t = Store::parseRef(ths->as_array(), header.reference, idxNew);
     if(t.dev_no == store.deviceNo()) return;
     RecRef u;
@@ -798,7 +799,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	if(!canonical) {
 	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
 	store.writeDelete(out, d, t, u);
-	// TODO +++ applyDeleteFromLoad(monthEvents, d);
+	auto p = store.events_.find(&d);
+	if(p != store.events_.end()) store.events_.erase(p);
     }
 	    }
     }
