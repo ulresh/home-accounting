@@ -41,6 +41,14 @@ struct Event {
 	return edit_datetime == r.edit_datetime && rec_no == r.rec_no &&
 	    dev_no == r.dev_no;
     }
+    bool eq_edit(const Event &r) const {
+	return edit_datetime == r.edit_datetime && rec_no == r.rec_no &&
+	    dev_no == r.dev_no;
+    }
+    bool eq_data(const Event &r) const {
+	return subject == r.subject && cost == r.cost &&
+	    people == r.people && volume == r.volume && comment == r.comment;
+    }
 };
 
 // Устройство сети: [DN, "<публичный ключ>"].

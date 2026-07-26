@@ -781,6 +781,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    Schema header;
 	    co_await aReadSizedJson(s, rbuf, ao->at(2).as_uint64(),
 		[&](const json::value &v) -> void {
+		    ++res.received;
     if (v.is_object()) {
 	auto& o = v.as_object();
 	if (o.if_contains("header")) header = Schema(o);
@@ -810,25 +811,36 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
 			v.as_array(), header, idxNew));
 	if(ep->dev_no == store.deviceNo()) return;
-	// TODO +++ дубли
-	store.events_.insert(eh);
+	if(store.events_.empty()) store.events_.insert(eh);
+	else {
+	    auto p = store.events_.lower_bound(eh);
+	    if(p != store.events_.end() && p->get()->eq_edit(*ep)) return;
+	    for(auto a = p, b = store.events_.begin(); a != b;) {
+		--a;
+		if(a->get()->event_datetime != ep->event_datetime) break;
+		if(a->get()->eq_data(*ep)) return;
+	    }
+	    for(auto a = p, e = store.events_.end();
+		a != e && a->get()->event_datetime == ep->event_datetime;
+		++a) if(a->get()->eq_data(*ep)) return;
+	    store.events_.insert(p, eh);
+	}
 	if(!canonical) {
 	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
 	out << Store::eventToLine(*ep) << std::endl;
     }
-		    ++res.received;
 		});
 	    idxNew->events[yyyymm].offset = out.tellp();
 	}
 	DvCMD(s);
-    // TODO +++ не забыть почистить дубликаты в event
-    // TODO +++ idxCur -> idxNew для отсутствующих на приёме ???
     }
+    // idxCur -> idxNew для отсутствующих на приёме не нужно:
+    // для клиента idxNew заполним позже в aSendAllIncrement
+    // для сервера idxCur==null, а idxNew уже заполнен одним из aSend*
     if(cmd != "end"sv) {
 	res.error = "bad protocol"sv;
 	co_return false;
     }
-	// TODO +++ done ???
     co_return true;
 }
 
