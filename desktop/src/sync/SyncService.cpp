@@ -787,18 +787,19 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	else if (!header) return;
 	else if (auto* del = o.if_contains("delete"))
 	    if(auto *ths = o.if_contains("this")) {
-	// TODO +++ dnMap
-	RecRef d = Store::parseRef(del->as_array(), header.reference);
-	RecRef t = Store::parseRef(ths->as_array(), header.reference);
-	if(t.dev_no == store.deviceNo()) return;
-	RecRef u;
-	if(auto *upd = o.if_contains("update"))
-	    u = Store::parseRef(upd->as_array(), header.reference);
-	MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
-	if(!mdels.ops.contains(op)) {
-	    out << json::serialize(v) << std::endl;
-	    // TODO +++ applyDeleteFromLoad(monthEvents, d);
-	}
+    RecRef d = Store::parseRef(del->as_array(), header.reference, idxNew);
+    RecRef t = Store::parseRef(ths->as_array(), header.reference, idxNew);
+    if(t.dev_no == store.deviceNo()) return;
+    RecRef u;
+    if(auto *upd = o.if_contains("update"))
+	u = Store::parseRef(upd->as_array(), header.reference, idxNew);
+    MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
+    if(!mdels.ops.contains(op)) {
+	if(!canonical) {
+	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
+	store.writeDelete(out, d, t, u);
+	// TODO +++ applyDeleteFromLoad(monthEvents, d);
+    }
 	    }
     }
     else if (!header) return;

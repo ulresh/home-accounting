@@ -220,14 +220,18 @@ public:
     void appendToMonth(int yyyymm, const std::string& line);
     // Перед записью НАШЕЙ строки убедиться, что действует наша каноническая схема.
     void ensureCanonicalHeader(int yyyymm);
+    void writeCanonicalHeader(int yyyymm, std::ofstream &out);
     // Записать строку удаления (target + this + update).
     void writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
 		     const Event *update);
+    void writeDelete(std::ofstream &out, const RecRef &d,
+		     const RecRef &t, const RecRef &u);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
     static RecRef parseRef(const json::array& a,
-			   const std::vector<std::string>& ref);
+			   const std::vector<std::string>& ref,
+			   const SyncIndex *idx = nullptr);
 
     std::filesystem::path root_;
     std::string db_ = "Основная";

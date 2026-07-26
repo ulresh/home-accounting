@@ -150,12 +150,19 @@ static Event *parseEventArray(const json::array& a, const Schema& s) {
 }
 
 RecRef Store::parseRef(const json::array& a,
-		       const std::vector<std::string>& ref) {
+		       const std::vector<std::string>& ref,
+		       const SyncIndex *idx) {
     RecRef r;
     for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
         if      (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
         else if (ref[i] == "rec_no")        r.rec_no = asInt(a[i]);
-        else if (ref[i] == "dev_no")        r.dev_no = asInt(a[i]);
+        else if (ref[i] == "dev_no") {
+	    r.dev_no = asInt(a[i]);
+	    if(idx) {
+		auto p = idx->dnMap.find(r.dev_no);
+		if(p != idx->dnMap.end()) r.dev_no = p->second;
+	    }
+	}
     }
     return r;
 }
@@ -574,6 +581,10 @@ void Store::ensureCanonicalHeader(int yyyymm) {
 	canonicalSchemaMonths_.insert(yyyymm);
     }
 }
+void Store::writeCanonicalHeader(int yyyymm, std::ofstream &out) {
+    out << canonicalHeaderLine() << std::endl;
+    canonicalSchemaMonths_.insert(yyyymm);
+}
 
 void Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
 			const Event *update) {
@@ -594,6 +605,23 @@ void Store::writeDelete(const std::string& tgtEdit, int tgtRn, int tgtDn,
 	o["update"] = std::move(upd);
     }
     appendToMonth(ym, json::serialize(o));
+}
+
+void Store::writeDelete(std::ofstream &out, const RecRef &d,
+			const RecRef &t, const RecRef &u) {
+    json::object o;
+    json::array del; del.emplace_back(jv(d.edit_datetime));
+    del.emplace_back(d.rec_no); del.emplace_back(d.dev_no);
+    json::array ths; ths.emplace_back(jv(t.edit_datetime));
+    ths.emplace_back(t.rec_no); ths.emplace_back(t.dev_no);
+    o["delete"] = std::move(del);
+    o["this"]   = std::move(ths);
+    if(!u.edit_datetime.empty()) {
+	json::array upd; upd.emplace_back(jv(u.edit_datetime));
+	upd.emplace_back(u.rec_no); upd.emplace_back(u.dev_no);
+	o["update"] = std::move(upd);
+    }
+    out << json::serialize(o) << std::endl;
 }
 
 Event &Store::addEvent(const std::string& event_datetime,
