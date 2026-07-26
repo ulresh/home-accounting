@@ -619,13 +619,14 @@ void Store::writeDelete(const std::string& tgtEvent,
     if(update) {
 	json::array upd; upd.emplace_back(jv(update->edit_datetime));
 	upd.emplace_back(update->rec_no); upd.emplace_back(update->dev_no);
+	upd.emplace_back(jv(update->event_datetime));
 	o["update"] = std::move(upd);
     }
     appendToMonth(ym, json::serialize(o));
 }
 
 void Store::writeDelete(std::ofstream &out, const RecRefDel &d,
-			const RecRef &t, const RecRef &u) {
+			const RecRef &t, const RecRefDel &u) {
     json::object o;
     json::array del; del.emplace_back(jv(d.edit_datetime));
     del.emplace_back(d.rec_no); del.emplace_back(d.dev_no);
@@ -637,6 +638,7 @@ void Store::writeDelete(std::ofstream &out, const RecRefDel &d,
     if(!u.edit_datetime.empty()) {
 	json::array upd; upd.emplace_back(jv(u.edit_datetime));
 	upd.emplace_back(u.rec_no); upd.emplace_back(u.dev_no);
+	upd.emplace_back(jv(u.event_datetime));
 	o["update"] = std::move(upd);
     }
     out << json::serialize(o) << std::endl;
@@ -931,9 +933,9 @@ void MonthDeletions::read(fs::path p, bool &canonical) {
 		if(auto *ths = o.if_contains("this")) {
 	auto d = Store::parseRefDel(del->as_array(), header.reference);
 	RecRef t = Store::parseRef(ths->as_array(), header.reference);
-	RecRef u;
+	RecRefDel u;
 	if(auto *upd = o.if_contains("update"))
-	    u = Store::parseRef(upd->as_array(), header.reference);
+	    u = Store::parseRefDel(upd->as_array(), header.reference);
 	ops.insert({d,t,u});
 		}
 	}

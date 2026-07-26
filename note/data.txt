@@ -46,8 +46,8 @@ getFilesDir()/Основная/2020/2606.jsonl
 ["2026-06-05","Джинсы",3760,"2026-06-12 10:09:20",0,1,"Мария"]
 ["2026-06-06","Стол",8200,"2026-06-12 10:09:21",0,1]
 
-{"delete":["<edit-datetime-for-deleted-event>",RN,DN],"this":["<delete-datetime>",RN,DN]}
-{"delete":["<edit-datetime-for-old-event>",RN,DN],"this":["<update-datetime>",RN,DN],"update":["<edit-datetime-for-new-event>",RN,DN]}.
+{"delete":["<edit-datetime-for-deleted-event>",RN,DN,"<event-datetime-for-deleted-event>"],"this":["<delete-datetime>",RN,DN]}
+{"delete":["<edit-datetime-for-old-event>",RN,DN,"<event-datetime-for-old-event>"],"this":["<update-datetime>",RN,DN],"update":["<edit-datetime-for-new-event>",RN,DN,"<event-datetime-for-new-event>"]}.
 
 
 последние null в строке не записывать.
@@ -59,6 +59,9 @@ cost можно с копейками, но чаще без.
 Записи группируем в файл по значению "<event_datetime>".
 В одном файле записи за месяц.
 Месячные файлы складываем в отдельные папки на каждые 10 лет.
+
+event-datetime в delete добавлен для поиска при синхронизации,
+а в update для информации, если новое значение в другом файле.
 
 Файлы событий не удаляем, не перезаписываем и не исправляем.
 Только дозапись в конец файла.

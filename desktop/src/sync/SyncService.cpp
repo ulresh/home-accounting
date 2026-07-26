@@ -791,9 +791,9 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 				     header.reference, idxNew);
     RecRef t = Store::parseRef(ths->as_array(), header.reference, idxNew);
     if(t.dev_no == store.deviceNo()) return;
-    RecRef u;
+    RecRefDel u;
     if(auto *upd = o.if_contains("update"))
-	u = Store::parseRef(upd->as_array(), header.reference, idxNew);
+	u = Store::parseRefDel(upd->as_array(), header.reference, idxNew);
     MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
     if(!mdels.ops.contains(op)) {
 	if(!canonical) {

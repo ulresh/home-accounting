@@ -217,7 +217,7 @@ public:
     void writeDelete(const std::string& tgtEvent, const std::string& tgtEdit,
 		     int tgtRn, int tgtDn, const Event *update = nullptr);
     void writeDelete(std::ofstream &out, const RecRefDel &d,
-		     const RecRef &t, const RecRef &u);
+		     const RecRef &t, const RecRefDel &u);
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
@@ -278,7 +278,8 @@ struct MonthEvents {
 struct MonthDeletions {
     struct Op {
 	RecRefDel del;
-	RecRef ths, upd;
+	RecRef ths;
+	RecRefDel upd;
 	bool operator < (const Op &rhs) const {
 	    return del < rhs.del || (del == rhs.del &&
 		(ths < rhs.ths || (ths == rhs.ths && upd < rhs.upd)));
