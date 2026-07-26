@@ -63,31 +63,50 @@ static std::string toHex(const unsigned char* md, unsigned n) {
     return out;
 }
 
+namespace {
+#define H(n,t,f) \
+struct n##Free { void operator()(t* p) const { if(p) f(p); } }; \
+using n##Ptr = std::unique_ptr<t, n##Free>;
+H(EvpMdCtx, EVP_MD_CTX, EVP_MD_CTX_free);
+#undef H
+}
 // ---- файловые помощники (потоковые: файл целиком в память не грузим) ----
 // Размер и SHA1 файла, считая его блоками фиксированного размера.
 FileState Store::stateOf(const fs::path& p) {
     FileState st;
     std::ifstream in(p, std::ios::binary);
     if (!in.is_open()) return st;
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr);
+    EvpMdCtxPtr ctx(EVP_MD_CTX_new());
+    EVP_DigestInit_ex(ctx.get(), EVP_sha1(), nullptr);
     std::vector<char> block(64 * 1024);
     uint64_t total = 0; bool any = false;
     while (in) {
         in.read(block.data(), (std::streamsize)block.size());
         std::streamsize got = in.gcount();
         if (got <= 0) break;
-        EVP_DigestUpdate(ctx, block.data(), (size_t)got);
+        EVP_DigestUpdate(ctx.get(), block.data(), (size_t)got);
         total += got; any = true;
     }
     st.size = total;
     if (any) {
         unsigned char md[EVP_MAX_MD_SIZE]; unsigned int n = 0;
-        EVP_DigestFinal_ex(ctx, md, &n);
+        EVP_DigestFinal_ex(ctx.get(), md, &n);
         st.sha1 = toHex(md, n);
     }
-    EVP_MD_CTX_free(ctx);
     return st;
+}
+
+void FileState::sum(const std::string &content) {
+    size = content.size();
+    if(!size) sha1.clear();
+    else {
+	EvpMdCtxPtr ctx(EVP_MD_CTX_new());
+	EVP_DigestInit_ex(ctx.get(), EVP_sha1(), nullptr);
+        EVP_DigestUpdate(ctx.get(), content.data(), content.size());
+        unsigned char md[EVP_MAX_MD_SIZE]; unsigned int n = 0;
+        EVP_DigestFinal_ex(ctx.get(), md, &n);
+        sha1 = toHex(md, n);
+    }
 }
 
 // ---- схемы ----
@@ -319,7 +338,7 @@ void Store::loadDevices() {
     });
 }
 
-void Store::saveDevices() {
+void Store::saveDevices(FileState *state) {
     std::string content;
     for (auto& d : devices_) {
         json::array a;
@@ -328,6 +347,7 @@ void Store::saveDevices() {
         if (!d.name.empty()) a.emplace_back(d.name);
         content += json::serialize(a) + "\n";
     }
+    if(state) state->sum(content);
     writeAtomic(pDevice(), content);
 }
 
@@ -350,7 +370,7 @@ void Store::loadPeople() {
     });
 }
 
-void Store::savePeople() {
+void Store::savePeople(FileState *state) {
     std::string content;
     for (auto& p : people_) {
 	// json::array a;
@@ -368,6 +388,7 @@ void Store::savePeople() {
 	    content += json::serialize(a) + "\n";
 	}
     }
+    if(state) state->sum(content);
     writeAtomic(dbDir() / "people.jsonl", content);
 }
 
@@ -463,7 +484,7 @@ void Store::loadCatalog() {
     catalog_.swap(loader.catalog_);
     catalog_delete.swap(loader.catalog_delete);
 }
-void Store::saveCatalog() {
+void Store::saveCatalog(FileState *state) {
     std::string content;
     for(auto &[category_name,items] : catalog_) {
 	{   json::object c;
@@ -493,6 +514,7 @@ void Store::saveCatalog() {
 	    content += json::serialize(i) + "\n";
 	}
     }
+    if(state) state->sum(content);
     writeAtomic(dbDir() / "catalog.jsonl", content);
 }
 

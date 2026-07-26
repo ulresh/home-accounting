@@ -73,6 +73,7 @@ struct FileState {
 	a.emplace_back(sha1);
 	return json::serialize(a);
     }
+    void sum(const std::string &content);
 };
 
 // Схема событийной строки: порядок/состав колонок и состав «ссылки» (reference),
@@ -203,9 +204,9 @@ public:
     void loadPeople();
     void loadCatalog();
     void loadEvents();
-    void savePeople();
-    void saveCatalog();
-    void saveDevices();
+    void savePeople(FileState *state = nullptr);
+    void saveCatalog(FileState *state = nullptr);
+    void saveDevices(FileState *state = nullptr);
 
     template<typename T> void read_last_edit(const T &d);
     // Низкоуровневая дозапись строки в месячный файл (+ учёт схемы/наличия).

@@ -521,7 +521,8 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     }
     store.devices_.swap(newDevices);
     store.deviceNo_ = newDeviceNo;
-    store.saveDevices();
+    SyncIndex idx;
+    store.saveDevices(&idx.device);
     store.saveConfig();
     auto av = json::parse(co_await aReadLine(s, rbuf));
     ao = &av.as_array();
@@ -546,11 +547,12 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 		});
 	store.people_.swap(newPeople);
 	store.people_delete.swap(newPeopleDelete);
-	store.savePeople();
+	store.savePeople(&idx.people);
 	av = json::parse(co_await aReadLine(s, rbuf));
 	ao = &av.as_array();
 	cmd = ao->at(0).as_string();
     }
+    else idx.people = store.stateOf(store.pPeople());
     if(cmd == "catalog"sv) {
 	CatalogLoader loader;
 	co_await aReadSizedJson(s, rbuf, ao->at(1).as_uint64(),
@@ -560,13 +562,12 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 		});
 	store.catalog_.swap(loader.catalog_);
 	store.catalog_delete.swap(loader.catalog_delete);
-	store.saveCatalog();
+	store.saveCatalog(&idx.catalog);
 	av = json::parse(co_await aReadLine(s, rbuf));
 	ao = &av.as_array();
 	cmd = ao->at(0).as_string();
     }
-    SyncIndex idx;
-    store.listManifest(idx); // TODO +++ получать сразу из d.store.save*()
+    else idx.catalog = store.stateOf(store.pCatalog());
     while(cmd == "event"sv) {
 	int yyyymm = ao->at(1).as_uint64();
 	auto p = store.monthPath(yyyymm);
