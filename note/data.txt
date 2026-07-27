@@ -72,16 +72,18 @@ getFilesDir()/Основная/catalog.jsonl
 
 События
 
-getFilesDir()/Основная/2020/2606.jsonl // TODO +++
-{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume"]}
+getFilesDir()/Основная/2020/2606.jsonl
+{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"],"reference":["edit_datetime","rec_no","dev_no","event_datetime"]}
 ["2026-06-12 10:00","Черешня",1200,"2026-06-12 10:09:12",0,1,{"volume":"2 кг"}]
 ["2026-06-12 10:00","Помидоры",300,"2026-06-12 10:09:12",1,1,null,"1.3 кг"}]
 ["2026-06-05","Джинсы",3760,"2026-06-12 10:09:20",0,1,"Мария"]
 ["2026-06-06","Стол",8200,"2026-06-12 10:09:21",0,1]
-
 {"delete":["<edit-datetime-for-deleted-event>",RN,DN,"<event-datetime-for-deleted-event>"],"this":["<delete-datetime>",RN,DN]}
 {"delete":["<edit-datetime-for-old-event>",RN,DN,"<event-datetime-for-old-event>"],"this":["<update-datetime>",RN,DN],"update":["<edit-datetime-for-new-event>",RN,DN,"<event-datetime-for-new-event>"]}.
 
+Порядок и состав из reference использовать в разборе
+{"delete":[...],"this":[...],...} (как в части delete, так и в
+частях this и update).
 
 последние null в строке не записывать.
 
@@ -119,11 +121,47 @@ Desktop - Desktop скопировать или ввести вручную.
 При синхронизации проверять совпадение имени текущей базы данных,
 при несовпадении предлагать переключиться или создать новую и переключиться.
 
+При первом сопряжении устройства без данных у него можно менять
+собственный DN (и даже нужно, поскольку при старте у всех устройств
+собственные DN одинаковые, что при первой синхронизации следует поменять,
+только не оба, а одного).
+При синхронизации надо делать map с пространства DN второго устройства
+на пространство DN текущего устройства.
+
+При синхронизации отдавать файлы (добавленный с прошлой синхронизации
+хвост), а не память.
+
+Хвосты файлов отдавать без разбора, для защиты от испорченных файлов
+передавать их в конструкциях вида
+["event-tail",202606,size]\n<содержимое файла>\n
+["device",size]\n<содержимое файла>\n
+["people",size]\n<содержимое файла>\n
+["catalog",size]\n<содержимое файла>\n
+
+При вливании игнорировать события с DN after map == this DN.
+// TODO +++ Также игнорировать события, у которых DN не найден в map.
+
+При синхронизации не вставлять повтор {"delete":[...],...} если он уже есть.
+Между синхронизациями {"delete":[...],...} не хранить.
+Подгружать их отдельным проходом.
 
 
-getFilesDir()/Основная/sync/DN.jsonl // TODO +++
-[2606,size,"<sha1sum>"]
 
+getFilesDir()/Основная/sync/DN.jsonl
+{"header":["event_datetime","subject","cost","edit_datetime","rec_no","dev_no","people","volume","comment"],"reference":["edit_datetime","rec_no","dev_no","event_datetime"]}
+["device-map",remote-dn,local-dn,...]
+["device",size,"<sha1sum>"]
+["people",size,"<sha1sum>"]
+["catalog",size,"<sha1sum>"]
+[202606,size,{"header":...}]
+[......,size]
+[......,size,{"header":...}]
+
+Заголовок в строках файлов событий хранится не свой, а собеседника.
+В начале пишу canonicalHeader, причём как раз свой (нужен для случая
+запуска новой версии со старой базой), для месячных файлов пишу заголовок,
+если последний полученный от собеседника заголовок отличается от
+моего канонического.
 
 
 Ввод. Новые значения сразу записывать в соотвествующий файл.
@@ -148,3 +186,7 @@ qt, boost::asio, boost::json.
 boost на appbuild в /usr/local.
 
 На build-машинах сети нет. На androidbuild2 для gradle настроен прокси.
+
+Эмулятор в docker-android запущен
+на IP 192.168.30.18, доступном с androidbuild2.
+Appium доступен на 192.168.30.18:4723.

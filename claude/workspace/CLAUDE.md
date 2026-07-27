@@ -71,6 +71,10 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 
 ## 4. Формат данных на диске
 Полное описание формата смотри в /workspace/home-accounting/data.txt
+.
+При расхождении требований в файлах /workspace/home-accounting/CLAUDE.md
+и /workspace/home-accounting/data.txt сообщить и прервать выполнение
+полученного задания.
 
 Корень: desktop `~/.data/home-accounting`, Android `filesDir`. Внутри:
 `database.jsonl` (список баз), `config.json`, `identity/` (ключ/сертификат),
