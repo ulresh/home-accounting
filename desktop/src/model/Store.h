@@ -97,20 +97,13 @@ struct Schema {
     std::string serialize() const;
 };
 
-// Манифест справочников (для обмена «состоянием» в начале сессии).
-struct ListManifest { // TODO +++ check usability
-    FileState people, catalog, device;
-};
 struct MonthSyncData {
-    /*MonthSyncData(uint64_t offset, Schema &&header)
-	: offset(offset), header(header)
-    {}
-    MonthSyncData() = default;*/
     uint64_t offset;
     Schema header;
 };
-struct SyncIndex : ListManifest {
+struct SyncIndex {
     bool empty = true;
+    FileState people, catalog, device;
     std::map<int, int> dnMap; // DN партнёра -> наш DN
     std::map<int, MonthSyncData> events;
 };
@@ -180,7 +173,7 @@ public:
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).
     static FileState stateOf(const std::filesystem::path &p);
-    void listManifest(ListManifest &m) const;
+    void listManifest(SyncIndex &m) const;
 
     // Индекс по партнёру: sync/<peerDn>.jsonl — СОСТОЯНИЕ СОБЕСЕДНИКА: сколько
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].

@@ -882,7 +882,7 @@ void Store::addDevice(std::unique_ptr<std::ofstream> &outp,
 //                      Инкрементная синхронизация
 // =====================================================================
 
-void Store::listManifest(ListManifest &m) const {
+void Store::listManifest(SyncIndex &m) const {
     m.people  = stateOf(dbDir() / "people.jsonl");
     m.catalog = stateOf(dbDir() / "catalog.jsonl");
     m.device  = stateOf(pDevice());
