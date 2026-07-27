@@ -862,7 +862,7 @@ int Store::addDevice(std::string_view pubkey) {
     json::array a;
     a.emplace_back(m);
     a.emplace_back(pubkey);
-    appendLine(pDevice(), json::serialize(a)); // TODO +++ аналогично сделать addPeople
+    appendLine(pDevice(), json::serialize(a));
     return m;
 }
 

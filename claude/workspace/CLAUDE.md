@@ -60,7 +60,7 @@ ssh androidbuild2 'cd .../android && gradle :app:testDebugUnitTest --rerun-tasks
 ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:assembleRelease
 ```
 `testDebugUnitTest` — JVM-юнит-тесты (`StoreSyncTest` 6 шт. вкл. отмену; `XCompatTest`
-по умолчанию пропускается). Эмулятор/Appium НЕ используем — всё на unit-тестах.
+по умолчанию пропускается).
 В `app/build.gradle.kts` тест-таску задан `LC_ALL=C.UTF-8` (иначе JVM на хосте кодирует
 кириллические ИМЕНА файлов как «????????»; содержимое всегда пишется явным UTF-8).
 
@@ -70,18 +70,21 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 запустить verify у второй. Android-сторона управляется env: `XC_MODE=produce|verify XC_DIR=<dir>`.
 
 ## 4. Формат данных на диске
+Полное описание формата смотри в /workspace/home-accounting/data.txt
+
 Корень: desktop `~/.data/home-accounting`, Android `filesDir`. Внутри:
 `database.jsonl` (список баз), `config.json`, `identity/` (ключ/сертификат),
 и на каждую базу — папка `<ИмяБазы>` (по умолчанию `Основная`) с:
-- `device.jsonl` — `[DN,"<pubkey b64>","имя"]`
-- `people.jsonl` — строки-имена
-- `catalog.jsonl` — `["Категория","поз1","поз2"...]` (позиция может быть вложенной категорией)
+- `device.jsonl`
+- `people.jsonl`
+- `catalog.jsonl`
 - `sync/<DN>.jsonl` — индекс синхронизации с партнёром DN (см. §5)
 - декадные папки `2020/`, `2030/`… → месячные `YYMM.jsonl` (события)
 
 **Месячный событийный файл** = последовательность JSON-значений (не построчно — границы
 определяет парсер). Виды строк:
 - `header`: `{"header":[...колонки...],"reference":["edit_datetime","rec_no","dev_no"]}`.
+// TODO +++
   Наша каноническая схема — 9 колонок: `event_datetime,subject,cost,edit_datetime,rec_no,dev_no,people,volume,comment`.
   Строки парсятся по ДЕЙСТВУЮЩЕМУ заголовку; партнёр может прислать другой порядок/состав —
   пишем «как получили» (только DN map), поэтому в одном файле бывают разные схемы.
@@ -99,8 +102,7 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 Полностью **потоковая и прерываемая**, peer-state индекс. Не накапливать файлы/блоки в памяти.
 - **Чтение файлов** — блоками в инкрементный парсер (desktop `boost::json::stream_parser`;
   Android — Jackson `Jk.forEachValue` в `model/Jsonl.kt`). `stateOf` (size+sha1) тоже стримит.
-- **Отдача** — `syncPlanOutgoing(peerManifest)` возвращает ПЛАН (путь/offset/len/prepend, без
-  данных); сетевой слой читает файл блоками и сразу пишет в сокет.
+- **Отдача** — сетевой слой читает файл блоками и сразу пишет в сокет.
 - **Приём** — блок читается из сокета и сразу разбирается: desktop корутинами
   (`co_await aReadToSink` → `syncRecvFeed`), Android `Store.syncReceiveBlob(...,BoundedInputStream)`.
 - **Async/cancel**: desktop = boost.asio C++20 корутины (`co_spawn`/`co_await`), `cancel()`
@@ -110,16 +112,11 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 - **Индекс `sync/<peerDn>.jsonl` хранит СОСТОЯНИЕ СОБЕСЕДНИКА**: строки `[yyyymm, offset]` =
   сколько байт нашего месячного файла у партнёра уже есть. Справочники — через обмен
   МАНИФЕСТАМИ (size+sha1 people/catalog/device) в начале сессии; список шлём, только если наша
-  версия отличается от версии партнёра. `syncCommit` пишет текущие размеры месяцев как offset.
-- **DN-map**: device-data шлётся всегда; получатель строит карту DN партнёра → свой DN по pubkey.
-  При вливании событий: игнорировать с DN→свой (эхо) и с DN не в карте. Конфликт одинаковых
-  стартовых DN решается `renumberSelf` (меняет только одно устройство, у которого нет данных).
-- **Дедуп**: `syncDedup` удаляет более поздний дубликат (совпадение всех полей кроме служебных),
-  оставляя самый ранний по (edit_datetime,dev_no,rec_no). Строки `delete` не дублируем
-  (ключ = target+update, `this` не в счёт); набор существующих delete строится лениво.
-- people/catalog сливаются на ОДНОЙ стороне (сервер мёржит, шлёт итог; клиент принимает как есть).
+  версия отличается от версии партнёра.
+  При вливании событий: игнорировать с DN→свой (эхо) +++ TODO +++ и с DN не в карте. +++
 
 ## 6. Инварианты — НЕ ломать
+// TODO +++
 - **Кросс-платформенная совместимость**: одинаковые имена колонок/reference, кадрирование
   обмена (`["event-tail",yyyymm,offset,size]\n<байты>\n`, `["device-data",size]\n…`, финал
   `["end"]`), хендшейк (`hello`/`ok` с db/device_no/pubkey/code/has_data/max_dn), обмен
