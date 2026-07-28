@@ -951,7 +951,12 @@ void Store::saveSyncIndex(int peerDn, const SyncIndex &idx) const {
     writeAtomic(syncIndexPath(peerDn), content.str());
 }
 
-void MonthDeletions::read(fs::path p, bool &canonical) {
+void Store::checkCanonical(int yyyymm, const Schema &header) {
+    if(header == canonicalSchema()) canonicalSchemaMonths_.insert(yyyymm);
+    else canonicalSchemaMonths_.erase(yyyymm);
+}
+
+void MonthDeletions::read(fs::path p) {
     Schema header;
     readValues(p, [&](const json::value& v){
 	if (v.is_object()) {
@@ -969,7 +974,6 @@ void MonthDeletions::read(fs::path p, bool &canonical) {
 		}
 	}
     });
-    canonical = (header == canonicalSchema());
 }
 
 } // namespace ha

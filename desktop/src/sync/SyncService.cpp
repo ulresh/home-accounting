@@ -769,23 +769,23 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		fs::create_directories(path.parent_path());
 	    std::ofstream out(path, std::ios::binary | std::ios::app);
 	    if(!out) { res.error = "file error"sv; co_return false; }
-	    bool canonical;
 	    MonthDeletions mdels;
 	    if(auto pos = out.tellp()) {
 		if(idxCur)
 		    // Заголовок в idxCur не используется
 		    idxCur->events[yyyymm].offset = pos;
-		// canonical = store.canonicalSchemaMonths_.contains(yyyymm);
-		mdels.read(path, canonical);
+		mdels.read(path);
 	    }
-	    else canonical = false;
 	    Schema header;
 	    co_await aReadSizedJson(s, rbuf, ao->at(2).as_uint64(),
 		[&](const json::value &v) -> void {
 		    ++res.received;
     if (v.is_object()) {
 	auto& o = v.as_object();
-	if (o.if_contains("header")) header = Schema(o);
+	if (o.if_contains("header")) {
+	    out << json::serialize(v) << std::endl;
+	    header = Schema(o);
+	}
 	else if (!header) return;
 	else if (auto* del = o.if_contains("delete"))
 	    if(auto *ths = o.if_contains("this")) {
@@ -798,9 +798,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	u = Store::parseRefDel(upd->as_array(), header.reference, idxNew);
     MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
     if(!mdels.ops.contains(op)) {
-	if(!canonical) {
-	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
-	store.writeDelete(out, d, t, u);
+	// TODO +++ dnMap
+	out << json::serialize(v) << std::endl;
 	auto p = store.events_.find(&d);
 	if(p != store.events_.end()) store.events_.erase(p);
     }
@@ -826,11 +825,11 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		++a) if(a->get()->eq_data(*ep)) return;
 	    store.events_.insert(p, eh);
 	}
-	if(!canonical) {
-	    store.writeCanonicalHeader(yyyymm, out); canonical = true; }
-	out << Store::eventToLine(*ep) << std::endl;
+	// TODO +++ dnMap
+	out << json::serialize(v) << std::endl;
     }
 		});
+	    if(header) store.checkCanonical(yyyymm, header);
 	    idxNew->events[yyyymm].offset = out.tellp();
 	}
 	DvCMD(s);

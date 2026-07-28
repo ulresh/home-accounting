@@ -179,6 +179,7 @@ public:
     // байт каждого нашего месячного файла у него уже есть. [yyyymm, offset].
     void loadSyncIndex(int peerDn, SyncIndex &idx) const;
     void saveSyncIndex(int peerDn, const SyncIndex &idx) const;
+    void checkCanonical(int yyyymm, const Schema &header);
 
     fs::path root() const { return root_; }
     fs::path pDevice() const { return dbDir()/"device.jsonl"s; }
@@ -282,7 +283,7 @@ struct MonthDeletions {
 		(ths < rhs.ths || (ths == rhs.ths && upd < rhs.upd)));
 	}
     };
-    void read(fs::path p, bool &canonical);
+    void read(fs::path p);
     std::set<Op> ops;
 };
 
