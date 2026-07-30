@@ -12,7 +12,7 @@ inline int jsonAsDevNo(const json::value &v) {
     // boost::json разбирает неотрицательное целое как int64
     // uint64 — только если не влезает в int64
     auto n = v.as_int64();
-    if(n <= 0 || n >= std::numeric_limits<int>::max())
+    if(n <= 0 || n > std::numeric_limits<int>::max())
 	throw std::runtime_error("bad DN value"s);
     return n;
 }

@@ -165,7 +165,8 @@ Event *Store::parseEventArray(const json::array& a, const Schema& s,
 	    ep->dev_no = asInt(v);
 	    if(idx) {
 		auto p = idx->dnMap.find(ep->dev_no);
-		if(p != idx->dnMap.end()) ep->dev_no = p->second;
+		if(p == idx->dnMap.end()) ep->dev_no = -1;
+		else ep->dev_no = p->second;
 	    }
 	}
         else if (c == "people")  ep->people  = asStr(v);
@@ -186,7 +187,8 @@ RecRef Store::parseRef(const json::array& a,
 	    r.dev_no = asInt(a[i]);
 	    if(idx) {
 		auto p = idx->dnMap.find(r.dev_no);
-		if(p != idx->dnMap.end()) r.dev_no = p->second;
+		if(p == idx->dnMap.end()) r.dev_no = -1;
+		else r.dev_no = p->second;
 	    }
 	}
     }
@@ -205,7 +207,8 @@ RecRefDel Store::parseRefDel(const json::array& a,
 	    r.dev_no = asInt(a[i]);
 	    if(idx) {
 		auto p = idx->dnMap.find(r.dev_no);
-		if(p != idx->dnMap.end()) r.dev_no = p->second;
+		if(p == idx->dnMap.end()) r.dev_no = -1;
+		else r.dev_no = p->second;
 	    }
 	}
     }

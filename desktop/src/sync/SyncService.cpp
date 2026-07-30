@@ -678,12 +678,15 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		    bool busyno = false;
 		    for(auto &d : store.devices_)
 			if(d.pubkey == n.pubkey) {
-			    if(d.no != n.no) idxNew->dnMap[n.no] = d.no;
+			    idxNew->dnMap[n.no] = d.no;
 			    return;
 			}
 			else if(d.no == n.no) busyno = true;
 		    if(busyno) reno.push_back(std::move(n));
-		    else store.addDevice(outp, n.no, n.pubkey);
+		    else {
+			store.addDevice(outp, n.no, n.pubkey);
+			idxNew->dnMap[n.no] = n.no;
+		    }
 		});
 	if(!reno.empty()) {
 	    auto m = store.maxDeviceNo();
@@ -792,11 +795,14 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    if(auto *ths = o.if_contains("this")) {
     RecRefDel d = Store::parseRefDel(del->as_array(),
 				     header.reference, idxNew);
+    if(d.dev_no == -1) return;
     RecRef t = Store::parseRef(ths->as_array(), header.reference, idxNew);
-    if(t.dev_no == store.deviceNo()) return;
+    if(t.dev_no == -1 || t.dev_no == store.deviceNo()) return;
     RecRefDel u;
-    if(auto *upd = o.if_contains("update"))
+    if(auto *upd = o.if_contains("update")) {
 	u = Store::parseRefDel(upd->as_array(), header.reference, idxNew);
+	if(u.dev_no == -1) return;
+    }
     MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
     if(!mdels.ops.contains(op)) {
 	// TODO +++ dnMap
@@ -812,7 +818,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	Event *ep;
 	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
 			v.as_array(), header, idxNew));
-	if(ep->dev_no == store.deviceNo() ||
+	if(ep->dev_no == -1 || ep->dev_no == store.deviceNo() ||
 	   mdels.ops.contains(*ep)) return;
 	if(store.events_.empty()) store.events_.insert(eh);
 	else {
@@ -821,7 +827,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    for(auto a = p, b = store.events_.begin(); a != b;) {
 		--a;
 		if(a->get()->event_datetime != ep->event_datetime) break;
-		if(a->get()->eq_data(*ep)) return;
+		if(a->get()->eq_data(*ep)) return; // TODO +++ 1. удалить у собеседника, иначе он удалит наше событие. А если событие добавлено уже после синхронизации, то его удалять не стоит - весь вопрос в том, как это определить. 2. (Под вопросом) Всё таки записать в файл оба - событие и удаление?
 	    }
 	    for(auto a = p, e = store.events_.end();
 		a != e && a->get()->event_datetime == ep->event_datetime;
