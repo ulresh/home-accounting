@@ -124,6 +124,7 @@ struct RangeScan {
     bool   firstIsHeader = false;
 };
 
+    // TODO +++ проверить, пока просто пропустил
 RangeScan scanRange(const fs::path& path, uint64_t from, uint64_t to) {
     RangeScan r;
     if (to <= from) return r;
@@ -198,7 +199,7 @@ struct Session : std::enable_shared_from_this<Session> {
     std::deque<Out> outq;
     std::ifstream outFile;
     uint64_t outPos = 0;
-    std::vector<char> wbuf;
+    MallocPtr<char> wbuf;
     Cont writeCb;
     bool inWrite = false;
 
@@ -218,6 +219,7 @@ struct Session : std::enable_shared_from_this<Session> {
     // доживёт до возврата в цикл событий.
     void attach(QSslSocket* s, Cont onReady) {
         sock = s;
+	conns.reserve(6);
         conns.push_back(QObject::connect(s, &QSslSocket::encrypted, s,
             [this, onReady] {
                 auto self = shared_from_this();
@@ -442,11 +444,11 @@ struct Session : std::enable_shared_from_this<Session> {
                 outPos = o.from;
             }
             std::size_t want = (std::size_t)std::min<uint64_t>(o.to - outPos,
-                                                               wbuf.size());
-            outFile.read(wbuf.data(), (std::streamsize)want);
+                                                               block_size());
+            outFile.read(wbuf.get(), (std::streamsize)want);
             std::streamsize got = outFile.gcount();
             if (got <= 0) { inWrite = false; fail("bad data"s); return; }
-            sock->write(wbuf.data(), (qint64)got);
+            sock->write(wbuf.get(), (qint64)got);
             outPos += (uint64_t)got;
             if (outPos >= o.to) { outFile.close(); outq.pop_front(); }
         }
@@ -487,6 +489,7 @@ struct Session : std::enable_shared_from_this<Session> {
         return json::serialize(h) + "\n"s;
     }
 
+    // TODO +++ review mark, double file read = scanRange & sendFile
     MonthSyncData queueFullEventFile(int yyyymm, const fs::path& path) {
         uint64_t size = fs::file_size(path);
         auto sc = scanRange(path, 0, size);
