@@ -47,15 +47,6 @@ static int asInt(const json::value& v) {
     if (v.is_double()) return (int)v.as_double();
     return 0;
 }
-// boost::json разбирает неотрицательное целое как int64 (uint64 — только если
-// не влезает в int64), поэтому is_uint64()/as_uint64() к разобранным значениям
-// неприменимы.
-static bool isNum(const json::value& v) { return v.is_int64() || v.is_uint64(); }
-static uint64_t asU64(const json::value& v) {
-    if (v.is_uint64()) return v.as_uint64();
-    if (v.is_int64())  { auto i = v.as_int64(); return i < 0 ? 0 : (uint64_t)i; }
-    return 0;
-}
 
 static std::string costToStr(double c) {
     double r = std::llround(c * 100.0) / 100.0;
@@ -928,34 +919,37 @@ void Store::loadSyncIndex(int peerDn, SyncIndex &idx) const {
 	    header = schemaFromHeaderNodefault(v.as_object());
 	else if(!header) ;
         else if(v.is_array()) {
+	    // мне достаточно размерности int64, uint64 буду считать ошибкой
 	    auto& a = v.as_array();
-	    if(a.empty()) return;
-	    if(a[0].is_string()) {
+	    if(a.empty()) ;
+	    else if(a[0].is_string()) {
 		auto s = a[0].as_string();
 		// ["device-map",remote,local,...] — пары, шаг 2.
 		if(s == "device-map") {
-		    for(std::size_t r = 1, l = 2; l < a.size(); r += 2, l += 2)
-			if(isNum(a[r]) && isNum(a[l]))
-			    idx.dnMap[asInt(a[r])] = asInt(a[l]);
+		    for(std::size_t r = 1, l = 2; l < a.size();
+				r += 2, l += 2)
+			if(a[r].is_int64() && a[l].is_int64())
+			    idx.dnMap[jsonAsDevNo(a[r])] = jsonAsDevNo(a[l]);
 		    idx.empty = false;
-		    return;
 		}
-		if(a.size() < 3 || !isNum(a[1]) || !a[2].is_string()) return;
-		FileState *p;
-		if(s == "device") p = &idx.device;
-		else if(s == "people") p = &idx.people;
-		else if(s == "catalog") p = &idx.catalog;
-		else return;
-		idx.empty = false;
-		p->size = asU64(a[1]);
-		p->sha1 = a[2].as_string();
+		else if(a.size() >= 3 && a[1].is_int64() &&
+			a[2].is_string()) {
+		    FileState *p;
+		    if(s == "device") p = &idx.device;
+		    else if(s == "people") p = &idx.people;
+		    else if(s == "catalog") p = &idx.catalog;
+		    else return;
+		    idx.empty = false;
+		    p->size = a[1].as_int64();
+		    p->sha1 = a[2].as_string();
+		}
 	    }
-	    else if (a.size() >= 2 && isNum(a[0]) && isNum(a[1])) {
+	    else if (a.size() >= 2 && a[0].is_int64() && a[1].is_int64()) {
 		idx.empty = false;
 		if(a.size() >= 3 && a[2].is_object())
-		    idx.events[asInt(a[0])] = { asU64(a[1]),
+		    idx.events[a[0].as_int64()] = { a[1].as_int64(),
 			schemaFromHeader(a[2].as_object()) };
-		else idx.events[asInt(a[0])] = { asU64(a[1]),
+		else idx.events[a[0].as_int64()] = { a[1].as_int64(),
 			// header здесь именно копируется, std::move нельзя
 						      header };
 	    }

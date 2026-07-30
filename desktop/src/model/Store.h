@@ -98,7 +98,7 @@ struct Schema {
 };
 
 struct MonthSyncData {
-    uint64_t offset;
+    int64_t offset;
     Schema header;
 };
 struct SyncIndex {

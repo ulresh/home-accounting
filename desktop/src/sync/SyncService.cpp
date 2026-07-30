@@ -207,11 +207,11 @@ asio::awaitable<void> aStreamFullFile(SslStream &s,
 
 asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
 	const Store &store, int yyyymm, const fs::path &path) {
-    auto size = fs::file_size(path);
+    int64_t size = fs::file_size(path);
     {   json::array h;
 	h.emplace_back("event"sv);
 	h.emplace_back(yyyymm);
-	h.emplace_back((uint64_t)size);
+	h.emplace_back(size);
 	co_await aWriteLine(s, json::serialize(h));
     }
     std::ifstream in(path, std::ios::binary);
@@ -598,7 +598,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
 		});
 	}
 	m.commit(yyyymm);
-	idx.events[yyyymm] = { fs::file_size(p), m.header };
+	idx.events[yyyymm] = { (int64_t)fs::file_size(p), m.header };
 	av = json::parse(co_await aReadLine(s, rbuf));
 	ao = &av.as_array();
 	cmd = ao->at(0).as_string();
