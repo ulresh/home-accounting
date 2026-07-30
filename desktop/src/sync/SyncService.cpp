@@ -1194,7 +1194,7 @@ struct SyncServer::Impl {
     // До верного кода подключений может быть сколько угодно: любой сканер портов
     // или чужой клиент занял бы единственный слот. Все они — кандидаты, и лишь
     // приславший верный код становится сеансом.
-    std::vector<std::shared_ptr<Session>> pending;
+    std::map<Session *, std::shared_ptr<Session>> pending;
     std::shared_ptr<Session> winner;
     std::string code;
     ConfirmFn confirm;
@@ -1213,32 +1213,25 @@ struct SyncServer::Impl {
     }
 
     // Кандидат отвалился (неверный код, разрыв, сбой TLS) — просто забыть его.
-    void drop(Session* s) {
-        for (auto it = pending.begin(); it != pending.end(); ++it)
-            if (it->get() == s) {
-                auto keep = *it;         // не разрушить сеанс под собственным вызовом
-                pending.erase(it);
-                return;
-            }
-    }
+    void drop(Session* s) { pending.erase(s); }
 
     // Пришёл верный код: слушателя закрыть, остальных кандидатов оборвать молча.
     void elect(Session* s) {
         listener.close();
-        auto others = std::move(pending);
-        pending.clear();
-        for (auto& p : others) {
-            if (p.get() == s) { winner = p; continue; }
-            p->done = nullptr;           // о проигравших наверх не сообщаем
-            p->cancel();
+	decltype(pending) others; others.swap(pending);
+        for (auto& [k,p] : others) {
+            if (p.get() == s) winner = p;
+	    else {
+		p->done = nullptr; // о проигравших наверх не сообщаем
+		p->cancel();
+	    }
         }
     }
 
     // Оборвать всех кандидатов (отмена/разрушение сервера).
     void dropAll() {
-        auto others = std::move(pending);
-        pending.clear();
-        for (auto& p : others) { p->done = nullptr; p->cancel(); }
+	decltype(pending) others; others.swap(pending);
+        for (auto& [k,p] : others) { p->done = nullptr; p->cancel(); }
     }
 };
 
@@ -1266,7 +1259,7 @@ PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
             else d->drop(p);
         };
         sess->onElected = [d, p] { d->elect(p); };
-        d->pending.push_back(sess);
+        d->pending[p] = sess;
         sess->attach(s, [p] { p->serverGo(); });
         s->startServerEncryption();
     };
