@@ -37,20 +37,6 @@ using SslStream = ssl::stream<tcp::socket>;
 
 namespace ha {
 
-// boost::json разбирает неотрицательное целое как int64 (uint64 выбирается,
-// только если значение не влезает в int64). Поэтому as_uint64() на РАЗОБРАННОМ
-// значении бросает исключение — читаем число независимо от вида, выбранного
-// парсером.
-inline std::uint64_t asU64(const json::value &v) {
-    if(v.is_uint64()) return v.as_uint64();
-    if(v.is_int64()) {
-	auto i = v.as_int64();
-	if(i < 0) throw std::runtime_error("negative number in protocol"s);
-	return (std::uint64_t)i;
-    }
-    throw std::runtime_error("number expected in protocol"s);
-}
-
 // ---------- PairInfo ----------
 std::string PairInfo::toJson() const {
     json::object o;
@@ -512,7 +498,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     decltype(store.devices_) newDevices;
     int newDeviceNo = 0;
     int peerDeviceNo = 0;
-    co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+    co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 	[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &store, &res
 	 ](const json::value &v) -> void {
 	    newDevices.push_back(Device(v, false));
@@ -544,7 +530,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     if(cmd == "people"sv) {
 	decltype(store.people_) newPeople, newPeopleDelete;
 	auto *p = &newPeople;
-	co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 		[&p,&newPeopleDelete,&res](const json::value &v) -> void {
         if(v.is_object()) {
 	    for(auto &[value,time] : v.as_object())
@@ -570,7 +556,7 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     else idx.people = store.stateOf(store.pPeople());
     if(cmd == "catalog"sv) {
 	CatalogLoader loader;
-	co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 		[&loader,&res](const json::value &v) -> void {
 		    loader.add(v);
 		    ++res.received;
@@ -584,13 +570,13 @@ asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
     }
     else idx.catalog = store.stateOf(store.pCatalog());
     while(cmd == "event"sv) {
-	int yyyymm = asU64(ao->at(1));
+	int yyyymm = ao->at(1).as_int64();
 	auto p = store.monthPath(yyyymm);
 	if(p.has_parent_path()) fs::create_directories(p.parent_path());
 	MonthEvents m(store);
 	{   std::ofstream out(p, std::ios::binary);
 	    co_await aReadSizedJson(s, rbuf,
-				    asU64(ao->at(2)),
+				    ao->at(2).as_int64(),
 		[&m,&out,&res](const json::value &v) -> void {
 		    out << json::serialize(v) << std::endl;
 		    m.add(v);
@@ -686,7 +672,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     if(cmd == "device"sv) {
 	std::unique_ptr<std::ofstream> outp;
 	std::list<Device> reno;
-	co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 		[&](const json::value &v) -> void {
 		    Device n(v, false);
 		    bool busyno = false;
@@ -727,7 +713,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     }
     if(cmd == "people"sv) {
 	bool part_delete = false;
-	co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 		[&](const json::value &v) -> void {
         if(v.is_object())
 	    for(auto &[value,time] : v.as_object())
@@ -766,7 +752,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    : store.stateOf(store.pPeople());
     if(cmd == "catalog"sv) {
 	CatalogIncrementLoader loader(store);
-	co_await aReadSizedJson(s, rbuf, asU64(ao->at(1)),
+	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
 		[&](const json::value &v) -> void {
 		    loader.add(v);
 		    ++res.received;
@@ -778,7 +764,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     else idxNew->catalog = idxCur ? idxCur->catalog
 	    : store.stateOf(store.pCatalog());
     while(cmd == "event"sv) {
-	int yyyymm = asU64(ao->at(1));
+	int yyyymm = ao->at(1).as_int64();
 	{   auto path = store.monthPath(yyyymm);
 	    if(path.has_parent_path())
 		fs::create_directories(path.parent_path());
@@ -792,7 +778,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		mdels.read(path);
 	    }
 	    Schema header;
-	    co_await aReadSizedJson(s, rbuf, asU64(ao->at(2)),
+	    co_await aReadSizedJson(s, rbuf, ao->at(2).as_int64(),
 		[&](const json::value &v) -> void {
 		    ++res.received;
     if (v.is_object()) {
