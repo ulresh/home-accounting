@@ -109,13 +109,11 @@ void SyncDialog::startServer() {
     status_->setText(tr("Ожидание подключения…"));
 
     server_ = std::make_unique<ha::SyncServer>(store_);
-    ha::PairInfo info;
     try {
-        info = server_->listen();
-        showPairInfo(QString::fromStdString(info.toJson()));
-        server_->start(
+        ha::PairInfo info = server_->start(
             [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); },
             [this](const ha::SyncResult& r) { onFinished(r); });
+        showPairInfo(QString::fromStdString(info.toJson()));
     } catch (const std::exception& e) {
         status_->setText(tr("Ошибка: ") + e.what());
         busy_ = false; serverBtn_->setEnabled(true); clientBtn_->setEnabled(true);

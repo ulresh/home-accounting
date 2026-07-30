@@ -1196,24 +1196,11 @@ struct SyncServer::Impl {
 SyncServer::SyncServer(Store& store) : d_(std::make_unique<Impl>(store)) {}
 SyncServer::~SyncServer() { cancel(); }
 
-PairInfo SyncServer::listen() {
-    if (!d_->listener.listen(QHostAddress::AnyIPv4, 0))
-        throw std::runtime_error("listen: " +
-                                 d_->listener.errorString().toStdString());
-    d_->listener.pauseAccepting();          // до start() соединения не разбираем
-    d_->code = randomCode(8);
-    PairInfo info;
-    info.ip = localIPv4();
-    info.port = d_->listener.serverPort();
-    info.code = d_->code;
-    info.db = d_->store.database();
-    return info;
-}
-
-void SyncServer::start(ConfirmFn confirm, DoneFn done) {
-    d_->confirm = std::move(confirm);
-    d_->done = std::move(done);
+PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
     Impl* d = d_.get();
+    // Обработчик ставим ДО listen(): иначе между «порт занят» и «есть кому
+    // разбирать подключение» остаётся окно (его и приходилось затыкать
+    // pauseAccepting).
     d->listener.onConn = [d](qintptr fd) {
         if (d->session) { ::close((int)fd); return; }
         auto sess = std::make_shared<Session>(d->store);
@@ -1241,7 +1228,20 @@ void SyncServer::start(ConfirmFn confirm, DoneFn done) {
         sess->attach(s, [p] { p->serverGo(); });
         s->startServerEncryption();
     };
-    d_->listener.resumeAccepting();
+    if (!d->listener.listen(QHostAddress::AnyIPv4, 0))
+        throw std::runtime_error("listen: " +
+                                 d->listener.errorString().toStdString());
+    // Взводим done только после удачного listen: у неудачного start()
+    // продолжения нет — вызывающий получает исключение.
+    d->code = randomCode(8);
+    d->confirm = std::move(confirm);
+    d->done = std::move(done);
+    PairInfo info;
+    info.ip = localIPv4();
+    info.port = d->listener.serverPort();
+    info.code = d->code;
+    info.db = d->store.database();
+    return info;
 }
 
 void SyncServer::cancel() {

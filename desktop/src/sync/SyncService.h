@@ -41,8 +41,9 @@ class SyncServer {
 public:
     explicit SyncServer(Store& store);
     ~SyncServer();
-    PairInfo listen();                          // занять свободный порт, сгенерировать код
-    void     start(ConfirmFn confirm, DoneFn done);  // неблокирующе: принять и синхронизировать
+    // Занять свободный порт, сгенерировать код и начать приём. Возвращает
+    // реквизиты сопряжения (для QR) сразу, результат сессии придёт в done.
+    PairInfo start(ConfirmFn confirm, DoneFn done);
     void     cancel();
     struct Impl;
 private:

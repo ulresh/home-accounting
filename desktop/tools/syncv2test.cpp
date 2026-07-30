@@ -52,11 +52,10 @@ static void spin(const std::function<bool()>& ready, int limitMs = 20000) {
 // работают в одном цикле событий, как в приложении (app.exec).
 static std::pair<SyncResult,SyncResult> sync(Store& A, Store& B) {
     SyncServer s(A);
-    PairInfo info = s.listen();
-    info.ip = "127.0.0.1";
     SyncResult ra, rb;
     int done = 0;
-    s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
+    PairInfo info = s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
+    info.ip = "127.0.0.1";
     SyncClient c(B);
     c.start(info, YES, [&](const SyncResult& r) { rb = r; ++done; });
     spin([&] { return done == 2; });
@@ -497,7 +496,6 @@ int main(int argc, char** argv) {
             fs::remove_all("/tmp/hv6a");
             Store A("/tmp/hv6a/.data/home-accounting"); A.load(); A.ensureIdentity();
             SyncServer s(A);
-            s.listen();
             SyncResult r;
             bool done = false;
             QObject ctx;                  // умрёт вместе с областью — снимет таймер
@@ -520,10 +518,10 @@ int main(int argc, char** argv) {
                 A.addEvent("2026-06-07", "Товар" + std::to_string(i), 10 + i, "", "", "");
 
             SyncServer s(A);
-            PairInfo info = s.listen(); info.ip = "127.0.0.1";
             SyncResult ra, rb;
             int done = 0;
-            s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
+            PairInfo info = s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
+            info.ip = "127.0.0.1";
             SyncClient c(B);
             c.start(info, YES, [&](const SyncResult& r) { rb = r; ++done; });
             QObject ctx;                  // умрёт вместе с областью — снимет таймер
@@ -592,12 +590,11 @@ int main(int argc, char** argv) {
 
         {   // (а) клиент пришёл с неверным кодом
             SyncServer s(A);
-            PairInfo info = s.listen();
-            info.ip = "127.0.0.1";
-            info.code = "WRONGCOD";
             SyncResult r1, r2;
             int done = 0;
-            s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            PairInfo info = s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            info.ip = "127.0.0.1";
+            info.code = "WRONGCOD";
             SyncClient c(B);
             c.start(info, YES, [&](const SyncResult& r) { r2 = r; ++done; });
             spin([&] { return done == 2; }, 5000);
@@ -609,11 +606,10 @@ int main(int argc, char** argv) {
         {   // (б) у сторон разные базы
             B.switchDatabase("Другая", true);
             SyncServer s(A);
-            PairInfo info = s.listen();
-            info.ip = "127.0.0.1";
             SyncResult r1, r2;
             int done = 0;
-            s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            PairInfo info = s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            info.ip = "127.0.0.1";
             SyncClient c(B);
             c.start(info, YES, [&](const SyncResult& r) { r2 = r; ++done; });
             spin([&] { return done == 2; }, 5000);
