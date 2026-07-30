@@ -222,13 +222,13 @@ public:
 
     static std::string eventToLine(const Event& e);
     static Event *parseEventArray(const json::array& a, const Schema& s,
-				  const SyncIndex *idx = nullptr);
+				  const std::map<int, int> *dnMap = nullptr);
     static RecRef parseRef(const json::array& a,
 			   const std::vector<std::string>& ref,
-			   const SyncIndex *idx = nullptr);
+			   const std::map<int, int> *dnMap = nullptr);
     static RecRefDel parseRefDel(const json::array& a,
 			   const std::vector<std::string>& ref,
-			   const SyncIndex *idx = nullptr);
+			   const std::map<int, int> *dnMap = nullptr);
 
     std::filesystem::path root_;
     std::string db_ = "Основная";

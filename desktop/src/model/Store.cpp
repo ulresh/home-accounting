@@ -149,8 +149,18 @@ static Schema schemaFromHeader(const json::object& o) { return Schema(o); }
 static Schema schemaFromHeaderNodefault(const json::object& o) {
     return Schema(o, false); }
 
+inline void devMap(const std::map<int, int> *dnMap, int &dev_no,
+		   const json::value &v) {
+    dev_no = jsonAsDevNo(v);
+    if(dnMap) {
+	auto p = dnMap->find(dev_no);
+	if(p == dnMap->end()) dev_no = -1;
+	else dev_no = p->second;
+    }
+}
+
 Event *Store::parseEventArray(const json::array& a, const Schema& s,
-			      const SyncIndex *idx) {
+			      const std::map<int, int> *dnMap) {
     Event* ep;
     std::unique_ptr<Event> eh(ep = new Event);
     for (size_t i = 0; i < s.columns.size() && i < a.size(); ++i) {
@@ -161,14 +171,7 @@ Event *Store::parseEventArray(const json::array& a, const Schema& s,
         else if (c == "cost")           ep->cost = asNum(v);
         else if (c == "edit_datetime")  ep->edit_datetime = asStr(v);
         else if (c == "rec_no")         ep->rec_no = asInt(v);
-        else if (c == "dev_no") {
-	    ep->dev_no = asInt(v);
-	    if(idx) {
-		auto p = idx->dnMap.find(ep->dev_no);
-		if(p == idx->dnMap.end()) ep->dev_no = -1;
-		else ep->dev_no = p->second;
-	    }
-	}
+        else if (c == "dev_no") devMap(dnMap, ep->dev_no, v);
         else if (c == "people")  ep->people  = asStr(v);
         else if (c == "volume")  ep->volume  = asStr(v);
         else if (c == "comment") ep->comment = asStr(v);
@@ -178,39 +181,25 @@ Event *Store::parseEventArray(const json::array& a, const Schema& s,
 
 RecRef Store::parseRef(const json::array& a,
 		       const std::vector<std::string>& ref,
-		       const SyncIndex *idx) {
+		       const std::map<int, int> *dnMap) {
     RecRef r;
     for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
         if      (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
         else if (ref[i] == "rec_no")        r.rec_no = asInt(a[i]);
-        else if (ref[i] == "dev_no") {
-	    r.dev_no = asInt(a[i]);
-	    if(idx) {
-		auto p = idx->dnMap.find(r.dev_no);
-		if(p == idx->dnMap.end()) r.dev_no = -1;
-		else r.dev_no = p->second;
-	    }
-	}
+        else if (ref[i] == "dev_no") devMap(dnMap, r.dev_no, a[i]);
     }
     return r;
 }
 
 RecRefDel Store::parseRefDel(const json::array& a,
 		       const std::vector<std::string>& ref,
-		       const SyncIndex *idx) {
+		       const std::map<int, int> *dnMap) {
     RecRefDel r;
     for (size_t i = 0; i < ref.size() && i < a.size(); ++i) {
         if     (ref[i] == "event_datetime") r.event_datetime = asStr(a[i]);
         else if (ref[i] == "edit_datetime") r.edit_datetime = asStr(a[i]);
         else if (ref[i] == "rec_no")        r.rec_no = asInt(a[i]);
-        else if (ref[i] == "dev_no") {
-	    r.dev_no = asInt(a[i]);
-	    if(idx) {
-		auto p = idx->dnMap.find(r.dev_no);
-		if(p == idx->dnMap.end()) r.dev_no = -1;
-		else r.dev_no = p->second;
-	    }
-	}
+        else if (ref[i] == "dev_no") devMap(dnMap, r.dev_no, a[i]);
     }
     return r;
 }
