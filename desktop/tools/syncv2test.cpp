@@ -90,13 +90,12 @@ static int countSubject(Store& s, const std::string& subj) {
     return n;
 }
 
-static RecRefDel refOf(const std::shared_ptr<Event>& e) {
-    RecRefDel r;
-    r.edit_datetime = e->edit_datetime;
-    r.rec_no = e->rec_no;
-    r.dev_no = e->dev_no;
-    r.event_datetime = e->event_datetime;
-    return r;
+// Ключ поиска в MonthDeletions::ops — Event; CompareOps сравнивает
+// только event_datetime.
+static Event atDate(const std::string& event_datetime) {
+    Event e;
+    e.event_datetime = event_datetime;
+    return e;
 }
 
 // Модель отдаёт события как shared_ptr — их же принимают deleteEvent/editEvent.
@@ -200,9 +199,6 @@ int main() {
         s.addEvent("2026-06-10", "Кофе", 250, "", "", "");
         s.addEvent("2026-06-11", "Чай", 120, "", "", "");
         s.addEvent("2026-07-05", "Хлеб", 40, "", "", "");
-        auto coffeeRef = refOf(findEvent(s, "Кофе"));
-        auto teaRef    = refOf(findEvent(s, "Чай"));
-        auto breadRef  = refOf(findEvent(s, "Хлеб"));
         s.deleteEvent(findEvent(s, "Чай"));
         s.deleteEvent(findEvent(s, "Хлеб"));
 
@@ -211,26 +207,26 @@ int main() {
         MonthDeletions md;
         md.read(june);
         check(md.ops.size() == 1, "из июньского файла прочитано одно удаление");
-        check(md.ops.find(&teaRef) != md.ops.end(),
-              "поиск по удаляемой записи находит удаление");
-        check(md.ops.find(&coffeeRef) == md.ops.end(),
-              "неудалённая запись в ops не находится");
+        check(md.ops.contains(atDate("2026-06-11")),
+              "поиск по event_datetime находит удаление «Чая»");
+        check(!md.ops.contains(atDate("2026-06-10")),
+              "за дату, где удалений нет, ничего не находится");
 
         MonthDeletions all;
         all.read(june);
         all.read(july);
         check(all.ops.size() == 2, "удаления двух месяцев собраны в один ops");
-        check(all.ops.find(&breadRef) != all.ops.end(), "июльское удаление найдено");
-        auto r6 = all.ops.equal_range("2026-06");
+        check(all.ops.contains(atDate("2026-07-05")), "июльское удаление найдено");
+        auto r6 = all.ops.equal_range(atDate("2026-06-11"));
         check(std::distance(r6.first, r6.second) == 1 &&
               r6.first->del.event_datetime == "2026-06-11",
-              "поиск по префиксу event_datetime: июнь -> удаление «Чая»");
-        auto r7 = all.ops.equal_range("2026-07");
+              "equal_range по event_datetime: удаление «Чая»");
+        auto r7 = all.ops.equal_range(atDate("2026-07-05"));
         check(std::distance(r7.first, r7.second) == 1 &&
               r7.first->del.event_datetime == "2026-07-05",
-              "поиск по префиксу event_datetime: июль -> удаление «Хлеба»");
-        auto r5 = all.ops.equal_range("2026-05");
-        check(r5.first == r5.second, "месяц без удалений даёт пустой диапазон");
+              "equal_range по event_datetime: удаление «Хлеба»");
+        auto r5 = all.ops.equal_range(atDate("2026-05-01"));
+        check(r5.first == r5.second, "дата без удалений даёт пустой диапазон");
     }
 
     // ============ 2. Схемо-зависимый разбор чужого порядка/состава ============
@@ -374,6 +370,33 @@ int main() {
         // перезагрузка B подтверждает устойчивость удаления
         Store B2(rb); B2.load();
         check(countSubject(B2, "Книга") == 0, "после перезагрузки B Книга не воскресает");
+    }
+
+    // ====== 5б. Новое событие с датой ранее удалённого ======
+    {
+        std::cout << "== 5б. новое событие с датой ранее удалённого ==\n";
+        fs::remove_all("/tmp/hv5c"); fs::remove_all("/tmp/hv5d");
+        fs::path ra = "/tmp/hv5c/.data/home-accounting";
+        fs::path rb = "/tmp/hv5d/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+
+        A.addEvent("2026-06-11", "Чай", 120, "", "", "");
+        sync(A, B);
+        check(countSubject(B, "Чай") == 1, "B получил «Чай»");
+
+        A.deleteEvent(findEvent(A, "Чай"));
+        sync(A, B);
+        check(countSubject(B, "Чай") == 0, "удаление «Чая» дошло до B");
+
+        // Другая запись (свои edit_datetime/rec_no), но та же дата события.
+        A.addEvent("2026-06-11", "Кефир", 55, "", "", "");
+        sync(A, B);
+        check(countSubject(B, "Кефир") == 1,
+              "новое событие с датой удалённого не потеряно у B");
+        Store B2(rb); B2.load();
+        check(countSubject(B2, "Кефир") == 1,
+              "оно же есть в файлах B после перезагрузки");
     }
 
     // ============ 6. Прерывание синхронизации (cancel в любом месте) ============
