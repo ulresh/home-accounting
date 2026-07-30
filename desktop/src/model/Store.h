@@ -288,7 +288,15 @@ struct MonthDeletions {
 	}
     };
     void read(fs::path p);
-    std::set<Op> ops;
+    struct CompareOps {
+	using is_transparent = void;
+	bool operator()(const Op &a, const Op &b) const { return a < b; }
+	bool operator()(const Op &a, const Event &b) const {
+	    return a.del.event_datetime < b.event_datetime; }
+	bool operator()(const Event &a, const Op &b) const {
+	    return a.event_datetime < b.del.event_datetime; }
+    };
+    std::set<Op, CompareOps> ops;
 };
 
 } // namespace ha

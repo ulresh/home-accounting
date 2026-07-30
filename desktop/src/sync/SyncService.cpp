@@ -826,8 +826,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	Event *ep;
 	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
 			v.as_array(), header, idxNew));
-	if(ep->dev_no == store.deviceNo() /* TODO +++ ||
-	   mdels.ops.contains(*ep) */) return;
+	if(ep->dev_no == store.deviceNo() ||
+	   mdels.ops.contains(*ep)) return;
 	if(store.events_.empty()) store.events_.insert(eh);
 	else {
 	    auto p = store.events_.lower_bound(eh);

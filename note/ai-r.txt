@@ -1000,3 +1000,67 @@ out << json::serialize(v) << std::endl;
 Чего это не решит: трёх красных проверок из секции 4. Там дедупликация записей с **разной** идентичностью `(edit_datetime, rec_no, dev_no)`, но одинаковыми данными — это ветка `eq_data`, другой механизм. И счётчика `received` тоже не касается.
 
 Сделать?
+
+
+
+
+==== CLAUDE folder=home-accounting session=03ac48c1-afe1-413b-8689-ac1d73089584 sessionId=03ac48c1-afe1-413b-8689-ac1d73089584 | отправлено 2026-07-30 10:03:26 | завершено 2026-07-30 10:09:01 ====
+Готово.
+
+## `RecRefDel` (`Types.h`)
+
+```cpp
+struct RecRefDel : RecRef {
+    bool operator < (const RecRefDel &rhs) const {
+	return event_datetime < rhs.event_datetime ||
+	    (event_datetime == rhs.event_datetime && RecRef::operator<(rhs));
+    }
+    bool operator == (const RecRefDel &rhs) const {
+	return event_datetime == rhs.event_datetime && RecRef::operator==(rhs);
+    }
+    std::string event_datetime;
+};
+```
+
+`event_datetime` первым, хвост — делегированием в `RecRef`, чтобы порядок оставшихся трёх полей был ровно тот же и не разъехался при будущих правках.
+
+Побочный эффект, о котором стоит знать: `MonthDeletions::Op::operator<` сравнивает `del` и `upd` (оба `RecRefDel`), поэтому порядок в `ops` поменялся — старшим ключом стал `event_datetime` удаляемой записи. Это и есть то, что делает поиск возможным.
+
+## `MonthDeletions::CompareOps` (`Store.h`)
+
+Прозрачный компаратор по образцу `CompareEventsSet`, `ops` теперь `std::set<Op, CompareOps>`:
+
+```cpp
+struct CompareOps {
+    using is_transparent = void;
+    bool operator()(const Op &a, const Op &b) const { return a < b; }
+    bool operator()(const Op &a, const RecRefDel *b) const { return a.del < *b; }
+    bool operator()(const RecRefDel *a, const Op &b) const { return *a < b.del; }
+    bool operator()(const Op &a, const char *b) const {
+	return compareDatetimeChar(a.del.event_datetime, b);
+    }
+    bool operator()(const char *a, const Op &b) const {
+	return compareCharDatetime(a, b.del.event_datetime);
+    }
+};
+```
+
+Ключ-указатель — чтобы вызов читался так же, как уже существующий `store.events_.find(&op.del)`.
+
+Сравнение с префиксом «ГГГГ-ММ» вынес в свободные `compareDatetimeChar`/`compareCharDatetime`, работающие со строкой; `compareEventChar`/`compareCharEvent` теперь делегируют в них. Логика та же побайтово, просто перестала быть привязанной к `shared_ptr<Event>` — иначе пришлось бы копировать в `CompareOps` эту неочевидную возню с длиной меньше 7.
+
+Неоднозначности между перегрузками `const RecRefDel*` и `const char*` нет: `RecRefDel*` в `const char*` неявно не приводится.
+
+## Тесты
+
+**`syncv2test` — 56/60** (было 45/49, +11 новых, все зелёные). Новая секция 1в:
+
+- `RecRefDel`: `event_datetime` старше `edit_datetime`; равенство по всем четырём полям; при равном `event_datetime` работает хвост от `RecRef`;
+- `ops.find(&recRefDel)` находит удаление и не находит неудалённую запись;
+- удаления двух месяцев, собранные в один `ops` двумя вызовами `read`, ищутся по префиксу: `equal_range("2026-06")` → удаление «Чая», `("2026-07")` → «Хлеба», `("2026-05")` → пусто.
+
+**`guitest` — 60/60.** Релиз собирается, md5 локально и на хосте совпали.
+
+Красных по-прежнему 4, те же самые (дедупликация у клиента ×3 и счётчик `received`).
+
+Сам поиск пока нигде не вызывается — это заготовка под проверку входящих событий по `mdels` в `aRecvAllIncrement`. Подключать?

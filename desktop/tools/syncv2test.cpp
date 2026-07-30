@@ -14,6 +14,7 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <iterator>
 #include <set>
 #include <string>
 #include <thread>
@@ -87,6 +88,15 @@ static int countSubject(Store& s, const std::string& subj) {
     int n = 0;
     for (auto& e : s.events()) if (e->subject == subj) ++n;
     return n;
+}
+
+static RecRefDel refOf(const std::shared_ptr<Event>& e) {
+    RecRefDel r;
+    r.edit_datetime = e->edit_datetime;
+    r.rec_no = e->rec_no;
+    r.dev_no = e->dev_no;
+    r.event_datetime = e->event_datetime;
+    return r;
 }
 
 // Модель отдаёт события как shared_ptr — их же принимают deleteEvent/editEvent.
@@ -169,6 +179,58 @@ int main() {
         check(countSubject(s2, "Билет") == 1, "после перезагрузки ровно одна версия");
         auto b = findEvent(s2, "Билет");
         check(b && b->event_datetime == "2026-05-20", "видна новая дата события");
+    }
+
+    // ====== 1в. Порядок RecRefDel и поиск в MonthDeletions::ops ======
+    {
+        std::cout << "== 1в. RecRefDel: порядок и поиск удалений ==\n";
+        // порядок: event_datetime старше edit_datetime
+        RecRefDel a, b;
+        a.event_datetime = "2026-06-01"; a.edit_datetime = "2026-07-01 00:00:00";
+        b.event_datetime = "2026-07-01"; b.edit_datetime = "2026-01-01 00:00:00";
+        check(a < b && !(b < a), "RecRefDel сравнивается по event_datetime первым");
+        RecRefDel c = a;
+        check(c == a && !(c < a) && !(a < c), "равенство RecRefDel по всем четырём полям");
+        c.rec_no = a.rec_no + 1;
+        check(!(c == a) && a < c, "при равном event_datetime работает хвост от RecRef");
+
+        fs::remove_all("/tmp/hv1c");
+        fs::path root = "/tmp/hv1c/.data/home-accounting";
+        Store s(root); s.load(); s.ensureIdentity();
+        s.addEvent("2026-06-10", "Кофе", 250, "", "", "");
+        s.addEvent("2026-06-11", "Чай", 120, "", "", "");
+        s.addEvent("2026-07-05", "Хлеб", 40, "", "", "");
+        auto coffeeRef = refOf(findEvent(s, "Кофе"));
+        auto teaRef    = refOf(findEvent(s, "Чай"));
+        auto breadRef  = refOf(findEvent(s, "Хлеб"));
+        s.deleteEvent(findEvent(s, "Чай"));
+        s.deleteEvent(findEvent(s, "Хлеб"));
+
+        fs::path june = root / "Основная" / "2020" / "2606.jsonl";
+        fs::path july = root / "Основная" / "2020" / "2607.jsonl";
+        MonthDeletions md;
+        md.read(june);
+        check(md.ops.size() == 1, "из июньского файла прочитано одно удаление");
+        check(md.ops.find(&teaRef) != md.ops.end(),
+              "поиск по удаляемой записи находит удаление");
+        check(md.ops.find(&coffeeRef) == md.ops.end(),
+              "неудалённая запись в ops не находится");
+
+        MonthDeletions all;
+        all.read(june);
+        all.read(july);
+        check(all.ops.size() == 2, "удаления двух месяцев собраны в один ops");
+        check(all.ops.find(&breadRef) != all.ops.end(), "июльское удаление найдено");
+        auto r6 = all.ops.equal_range("2026-06");
+        check(std::distance(r6.first, r6.second) == 1 &&
+              r6.first->del.event_datetime == "2026-06-11",
+              "поиск по префиксу event_datetime: июнь -> удаление «Чая»");
+        auto r7 = all.ops.equal_range("2026-07");
+        check(std::distance(r7.first, r7.second) == 1 &&
+              r7.first->del.event_datetime == "2026-07-05",
+              "поиск по префиксу event_datetime: июль -> удаление «Хлеба»");
+        auto r5 = all.ops.equal_range("2026-05");
+        check(r5.first == r5.second, "месяц без удалений даёт пустой диапазон");
     }
 
     // ============ 2. Схемо-зависимый разбор чужого порядка/состава ============

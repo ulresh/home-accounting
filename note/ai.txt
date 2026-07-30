@@ -600,6 +600,9 @@ event_datetime первым.
 Добавь в MonthDeletions::ops поиск по event_datetime через класс для
 сравнения аналогично Store::Events.
 
+ai-r.txt
+==== CLAUDE folder=home-accounting session=03ac48c1-afe1-413b-8689-ac1d73089584 sessionId=03ac48c1-afe1-413b-8689-ac1d73089584 | отправлено 2026-07-30 10:03:26 | завершено 2026-07-30 10:09:01 ====
+
 
 
 

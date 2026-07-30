@@ -31,6 +31,14 @@ struct RecRef {
     std::string edit_datetime; int rec_no = 0; int dev_no = 0;
 };
 struct RecRefDel : RecRef {
+    bool operator < (const RecRefDel &rhs) const {
+	return event_datetime < rhs.event_datetime ||
+	    (event_datetime == rhs.event_datetime && RecRef::operator<(rhs));
+    }
+    bool operator == (const RecRefDel &rhs) const {
+	return event_datetime == rhs.event_datetime &&
+	    RecRef::operator==(rhs);
+    }
     std::string event_datetime;
 };
 
