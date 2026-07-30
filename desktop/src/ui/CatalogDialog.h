@@ -1,13 +1,13 @@
 #pragma once
 #include <QDialog>
-#include <vector>
-#include "../model/Types.h"
+#include <QString>
 
 class QListWidget;
 
 namespace ha { class Store; }
 
-// Редактор каталога: категории и входящие в них наименования или вложенные категории.
+// Редактор каталога: категории и входящие в них наименования или вложенные
+// категории. Изменения пишутся в файл сразу (отдельной команды «Сохранить» нет).
 class CatalogDialog : public QDialog {
     Q_OBJECT
 public:
@@ -18,15 +18,14 @@ private slots:
     void removeCategory();
     void addItem();
     void removeItem();
-    void apply();
 
 private:
-    void reloadCats(int select = -1);
-    void reloadItems();
-    int  currentCat() const;
+    void reloadCats(const QString& select = {});
+    void reloadItems(const QString& select = {});
+    QString currentCat() const;
+    QString currentItem() const;
 
     ha::Store& store_;
-    std::vector<ha::CatalogEntry> work_;   // рабочая копия
     QListWidget* cats_;
     QListWidget* items_;
 };

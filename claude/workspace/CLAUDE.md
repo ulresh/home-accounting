@@ -46,8 +46,10 @@ cd android && tar czf - app/src app/build.gradle.kts | \
 ### Desktop (CMake-цели: `home-accounting`, `guitest`, `syncv2test`, `xcompattest`)
 ```bash
 ssh appbuild 'cd .../desktop && cmake -S . -B build && cmake --build build -j4 --target syncv2test'
-ssh appbuild 'cd .../desktop && ./build/syncv2test'                         # 41 unit-тест модели+синка
-ssh appbuild 'cd .../desktop && QT_QPA_PLATFORM=offscreen ./build/guitest'  # отмена синка из UI
+ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 42 unit-теста модели+синка
+ssh appbuild 'cd .../desktop && ./build/guitest'       # 60 offscreen-тестов UI
+                                                      # (guitest сам ставит QT_QPA_PLATFORM=offscreen
+                                                      #  и создаёт данные в ./guitest-data)
 ssh appbuild 'cd .../desktop && ./build/xcompattest produce <dir> | verify <dir>'  # кросс-формат
 # релиз: cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release --target home-accounting
 ```
@@ -94,13 +96,15 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   пишем «как получили» (только DN map), поэтому в одном файле бывают разные схемы.
 - событие — массив по колонкам схемы (хвостовые null обрезаются, но не короче 6 полей).
 - удаление — `{"delete":[ref удаляемого],"this":[ref записи-удаления],"update":[ref нового]?}`,
-  где ref = поля из `reference` (edit_datetime,rec_no,dev_no). `update:true` — это была правка
-  (editEvent = delete старого с update + add нового).
+  где ref = поля из `reference` (edit_datetime,rec_no,dev_no). Наличие `update` означает, что
+  это была правка (editEvent = delete старого + add нового); `update` — именно МАССИВ-ссылка
+  на новую запись, как в data.txt, а не `true`.
 
 Идентичность записи = `(edit_datetime, rec_no, dev_no)`. Файл события выбирается по
 `yyyymmOf(event_datetime)`; запись удаления — по `yyyymmOf(target.edit_datetime)`.
-Загрузка — потоковая, по месяцам в порядке возрастания, удаления применяются на лету;
-`raw` в памяти не держим.
+Загрузка — два прохода: сначала `MonthDeletions` собирает удаления по ВСЕМ месяцам (запись
+удаления обычно лежит в другом файле, чем само событие), затем месяцы читаются потоково по
+возрастанию и удалённые события в память не берутся. `raw` в памяти не держим.
 
 ## 5. Синхронизация (важное)
 Полностью **потоковая и прерываемая**, peer-state индекс. Не накапливать файлы/блоки в памяти.
@@ -131,6 +135,19 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   полей/переменных не трогать.
 
 ## 7. Подводные камни (уже наступали)
+- **boost::json и целые числа**: парсер кладёт неотрицательное целое в `int64`, а `uint64`
+  выбирает, только если значение не влезает в `int64`. Поэтому `as_uint64()`/`is_uint64()`
+  к РАЗОБРАННОМУ значению неприменимы: `as_uint64()` бросает, `is_uint64()` всегда false.
+  Использовать `asU64()`/`isNum()` (есть в `Store.cpp` и `SyncService.cpp`). Из-за этого
+  однажды молча не грузились `device.jsonl` и `sync/DN.jsonl`, а синхронизация падала на
+  первом же блоке.
+- **Висячий `else`**: в разборе `people.jsonl` ветка `else if(v.is_array())` без скобок
+  прилипала к внутреннему `if(time.is_string())`, из-за чего маркер `["delete"]` не
+  переключал список и удалённые люди читались как действующие.
+- **Удаления при загрузке**: запись `{"delete":...}` лежит в файле месяца
+  `yyyymmOf(target.edit_datetime)`, а само событие — в `yyyymmOf(event_datetime)`; это, как
+  правило, РАЗНЫЕ файлы. Поэтому `loadEvents()` сначала отдельным проходом собирает все
+  удаления по всем месяцам (`MonthDeletions`), и только потом читает события.
 - **Android JSON**: `kotlinx-serialization` `decodeToSequence` НЕ тянет смешанные типы значений
   в JSONL — поэтому ушли на **Jackson streaming** (он умеет инкрементный разбор произвольной
   последовательности значений). Не возвращать kotlinx.
@@ -145,15 +162,30 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   корутины — «array used as initializer». Собирать объект в именованную переменную заранее.
 - **Путь доставки tar** (см. §2) — сверять md5.
 
-## 8. Текущий статус (на момент написания)
-Всё реализовано и зелёное:
-- Desktop: `syncv2test` 41/41 (вкл. отмену во время accept и во время обмена), `guitest`
-  (отмена из UI), `xcompattest` self 14/14; релиз-бинарь собирается (~946 КБ).
-- Android (Jackson): `StoreSyncTest` 6/6 (вкл. `cancelInterrupts`), кросс-тесты обе стороны
-  (desktop↔Android 14/14 и crossVerify без ошибок); релиз-APK собирается (~14 МБ, **unsigned**),
-  Jackson внутри, kotlinx удалён.
+## 8. Текущий статус (после переработки model/sync и приведения к ней UI)
+- Desktop UI приведён к новому API модели: события — `shared_ptr<Event>`, поля
+  `people/volume/comment` — обычные строки, `people()`/`catalog()` — map с отметками времени.
+  Новый `PeopleDialog`, переписанный `CatalogDialog` (пишет сразу, без «Сохранить»).
+- `guitest` — 60/60: таблица, фильтр, добавление/правка/удаление через диалоги, редакторы
+  каталога и людей, перезагрузка с диска, отмена синхронизации закрытием окна.
+- `syncv2test` — 37/42. Остаток — незавершённое слияние в sync (см. ниже), не UI.
+- Релиз-бинарь собирается (~1,04 МБ).
+- **`xcompattest` исключён из сборки по умолчанию** (`EXCLUDE_FROM_ALL`): написан под старый
+  API (`syncBegin`/`syncPlanOutgoing`/`syncRecvFeed`/`ListManifest`), которого больше нет.
+- Android не трогали; кросс-тесты обе стороны из-за `xcompattest` сейчас не гоняются.
+
+### Что ещё не работает в sync (падает в `syncv2test`)
+- Дедупликация одинаковых событий выполняется только на стороне сервера: у клиента дубликат
+  остаётся и в памяти, и в файлах.
+- Удаление, полученное клиентом, применяется к файлам, но не к `events_` в памяти
+  (после `load()` всё верно; UI это скрывает, т.к. `MainWindow::onSync` перечитывает базу).
+- Счётчики `sent`/`received` разнородны: `sent` считает блоки, `received` — JSON-значения
+  (включая строку `header`). data.txt требует «передано N записей, принято K записей».
+- В `SyncService.cpp` остались пометки `// TODO +++ dnMap` в приёме событий/удалений.
 
 ## 9. Возможные следующие шаги
+- Доделать слияние в sync (список выше) — это единственные красные тесты.
+- Переписать `xcompattest` под новый потоковый API и вернуть кросс-тесты обе стороны.
 - **Подписать релиз-APK** (`app-release-unsigned.apk`) — нужен keystore (свой или сгенерить);
   можно прописать `signingConfig` в `app/build.gradle.kts` или подписать `apksigner`-ом.
 - Реальная end-to-end TLS-синхронизация C++↔JVM по сети между хостами (сейчас кросс-проверка —

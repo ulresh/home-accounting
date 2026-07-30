@@ -17,36 +17,47 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
     setMinimumWidth(360);
 
     subject_ = new QComboBox(this);
+    subject_->setObjectName("subject");
     subject_->setEditable(true);
-    // наполнить позициями каталога
+    // Наполнить позициями каталога. Позиция может быть вложенной категорией —
+    // такие в список наименований не берём, это группировка, а не товар.
+    const auto& catalog = store_.catalog();
     std::set<QString> items;
-    for (auto& c : store_.catalog())
-        for (auto& it : c.items)
-            items.insert(QString::fromStdString(it));
+    for (auto& [category, content] : catalog)
+        for (auto& [item, addtime] : content.items)
+            if (!catalog.contains(item))
+                items.insert(QString::fromStdString(item));
     for (auto& it : items) subject_->addItem(it);
     subject_->setCurrentText("");
 
     cost_ = new QDoubleSpinBox(this);
+    cost_->setObjectName("cost");
     cost_->setRange(0.0, 1e9);
     cost_->setDecimals(2);
     cost_->setGroupSeparatorShown(true);
 
     when_ = new QDateTimeEdit(QDateTime::currentDateTime(), this);
+    when_->setObjectName("when");
     when_->setDisplayFormat("yyyy-MM-dd HH:mm");
     when_->setCalendarPopup(true);
 
     withTime_ = new QCheckBox(tr("учитывать время"), this);
+    withTime_->setObjectName("withTime");
     withTime_->setChecked(true);
 
     people_ = new QComboBox(this);
+    people_->setObjectName("people");
     people_->setEditable(true);
     people_->addItem("");
-    for (auto& p : store_.people()) people_->addItem(QString::fromStdString(p));
+    for (auto& [name, addtime] : store_.people())
+        people_->addItem(QString::fromStdString(name));
 
     volume_ = new QLineEdit(this);
+    volume_->setObjectName("volume");
     volume_->setPlaceholderText(tr("напр. 2 кг"));
 
     comment_ = new QLineEdit(this);
+    comment_->setObjectName("comment");
     comment_->setPlaceholderText(tr("необязательно"));
 
     if (edit) {
@@ -59,9 +70,9 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
         } else {
             when_->setDateTime(QDateTime::fromString(dt, "yyyy-MM-dd HH:mm"));
         }
-        if (edit->people) people_->setCurrentText(QString::fromStdString(*edit->people));
-        if (edit->volume) volume_->setText(QString::fromStdString(*edit->volume));
-        if (edit->comment) comment_->setText(QString::fromStdString(*edit->comment));
+        people_->setCurrentText(QString::fromStdString(edit->people));
+        volume_->setText(QString::fromStdString(edit->volume));
+        comment_->setText(QString::fromStdString(edit->comment));
     }
 
     auto* form = new QFormLayout(this);
@@ -87,18 +98,6 @@ QString EventDialog::eventDateTime() const {
 QString EventDialog::subject() const { return subject_->currentText().trimmed(); }
 double  EventDialog::cost() const { return cost_->value(); }
 
-std::optional<QString> EventDialog::people() const {
-    QString p = people_->currentText().trimmed();
-    if (p.isEmpty()) return std::nullopt;
-    return p;
-}
-std::optional<QString> EventDialog::volume() const {
-    QString v = volume_->text().trimmed();
-    if (v.isEmpty()) return std::nullopt;
-    return v;
-}
-std::optional<QString> EventDialog::comment() const {
-    QString c = comment_->text().trimmed();
-    if (c.isEmpty()) return std::nullopt;
-    return c;
-}
+QString EventDialog::people() const  { return people_->currentText().trimmed(); }
+QString EventDialog::volume() const  { return volume_->text().trimmed(); }
+QString EventDialog::comment() const { return comment_->text().trimmed(); }

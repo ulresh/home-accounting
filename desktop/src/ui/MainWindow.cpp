@@ -3,6 +3,7 @@
 #include "SyncDialog.h"
 #include "SettingsDialog.h"
 #include "CatalogDialog.h"
+#include "PeopleDialog.h"
 #include "../model/Store.h"
 
 #include <QTableWidget>
@@ -16,9 +17,9 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QMessageBox>
-#include <QInputDialog>
 #include <QStatusBar>
 #include <QLocale>
+#include <memory>
 
 MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     : QMainWindow(parent), store_(store) {
@@ -31,6 +32,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     // Панель фильтра — одно поле (наименование / человек / категория)
     auto* filters = new QHBoxLayout();
     search_ = new QLineEdit(central);
+    search_->setObjectName("search");
     search_->setPlaceholderText(tr("Фильтр: наименование, кому или категория…"));
     search_->setClearButtonEnabled(true);
     filters->addWidget(search_, 1);
@@ -45,6 +47,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
 
     // Таблица
     table_ = new QTableWidget(central);
+    table_->setObjectName("events");
     table_->setColumnCount(7);
     table_->setHorizontalHeaderLabels(
         {tr("Дата"), tr("Категория"), tr("Наименование"), tr("Стоимость"), tr("Кому"), tr("Количество"), tr("Комментарий")});
@@ -103,7 +106,7 @@ void MainWindow::refresh() {
     QLocale loc;
     table_->setRowCount((int)rows_.size());
     for (int i = 0; i < (int)rows_.size(); ++i) {
-        const auto& e = rows_[i];
+        const ha::Event& e = *rows_[i];
         auto set = [&](int col, const QString& s) {
             table_->setItem(i, col, new QTableWidgetItem(s));
         };
@@ -111,9 +114,9 @@ void MainWindow::refresh() {
         set(1, QString::fromStdString(store_.categoryOf(e.subject)));
         set(2, QString::fromStdString(e.subject));
         set(3, loc.toString(e.cost, 'f', (e.cost == (long long)e.cost) ? 0 : 2));
-        set(4, e.people ? QString::fromStdString(*e.people) : QString());
-        set(5, e.volume ? QString::fromStdString(*e.volume) : QString());
-        set(6, e.comment ? QString::fromStdString(*e.comment) : QString());
+        set(4, QString::fromStdString(e.people));
+        set(5, QString::fromStdString(e.volume));
+        set(6, QString::fromStdString(e.comment));
     }
     statusBar()->showMessage(tr("Записей: %1").arg(rows_.size()));
 }
@@ -125,36 +128,34 @@ void MainWindow::onAdd() {
         QMessageBox::warning(this, tr("Добавление"), tr("Укажите наименование."));
         return;
     }
-    std::optional<std::string> ppl, vol, com;
-    if (auto p = dlg.people()) ppl = p->toStdString();
-    if (auto v = dlg.volume()) vol = v->toStdString();
-    if (auto c = dlg.comment()) com = c->toStdString();
     store_.addEvent(dlg.eventDateTime().toStdString(), dlg.subject().toStdString(),
-                    dlg.cost(), ppl, vol, com);
+                    dlg.cost(), dlg.people().toStdString(),
+                    dlg.volume().toStdString(), dlg.comment().toStdString());
     refresh();
 }
 
 void MainWindow::onEdit() {
     int r = selectedRow();
     if (r < 0) { QMessageBox::information(this, tr("Изменение"), tr("Выберите запись.")); return; }
-    ha::Event old = rows_[r];
-    EventDialog dlg(store_, &old, this);
+    auto old = rows_[r];                 // shared_ptr: объект переживёт удаление из Store
+    EventDialog dlg(store_, old.get(), this);
     if (dlg.exec() != QDialog::Accepted) return;
-    std::optional<std::string> ppl, vol, com;
-    if (auto p = dlg.people()) ppl = p->toStdString();
-    if (auto v = dlg.volume()) vol = v->toStdString();
-    if (auto c = dlg.comment()) com = c->toStdString();
+    if (dlg.subject().isEmpty()) {
+        QMessageBox::warning(this, tr("Изменение"), tr("Укажите наименование."));
+        return;
+    }
     store_.editEvent(old, dlg.eventDateTime().toStdString(), dlg.subject().toStdString(),
-                     dlg.cost(), ppl, vol, com);
+                     dlg.cost(), dlg.people().toStdString(),
+                     dlg.volume().toStdString(), dlg.comment().toStdString());
     refresh();
 }
 
 void MainWindow::onDelete() {
     int r = selectedRow();
     if (r < 0) { QMessageBox::information(this, tr("Удаление"), tr("Выберите запись.")); return; }
-    ha::Event e = rows_[r];
+    auto e = rows_[r];
     auto resp = QMessageBox::question(this, tr("Удаление"),
-        tr("Удалить запись «%1»?").arg(QString::fromStdString(e.subject)));
+        tr("Удалить запись «%1»?").arg(QString::fromStdString(e->subject)));
     if (resp != QMessageBox::Yes) return;
     store_.deleteEvent(e);
     refresh();
@@ -168,16 +169,9 @@ void MainWindow::onSync() {
 }
 
 void MainWindow::onManagePeople() {
-    QStringList items;
-    for (auto& p : store_.people()) items << QString::fromStdString(p);
-    bool ok = false;
-    QString name = QInputDialog::getText(this, tr("Люди"),
-        tr("Текущие: %1\n\nДобавить человека:").arg(items.join(", ")),
-        QLineEdit::Normal, "", &ok);
-    if (ok && !name.trimmed().isEmpty()) {
-        store_.addPerson(name.trimmed().toStdString());
-        refresh();
-    }
+    PeopleDialog dlg(store_, this);
+    dlg.exec();
+    refresh();
 }
 
 void MainWindow::onCatalog() {

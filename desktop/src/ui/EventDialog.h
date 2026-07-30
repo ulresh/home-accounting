@@ -1,6 +1,5 @@
 #pragma once
 #include <QDialog>
-#include <optional>
 #include "../model/Types.h"
 
 class QComboBox;
@@ -19,9 +18,10 @@ public:
     QString eventDateTime() const;
     QString subject() const;
     double  cost() const;
-    std::optional<QString> people() const;
-    std::optional<QString> volume() const;
-    std::optional<QString> comment() const;
+    // Пустая строка = поле не заполнено (модель хранит поля как std::string).
+    QString people() const;
+    QString volume() const;
+    QString comment() const;
 
 private:
     ha::Store& store_;

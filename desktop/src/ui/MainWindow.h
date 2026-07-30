@@ -1,5 +1,6 @@
 #pragma once
 #include <QMainWindow>
+#include <memory>
 #include <vector>
 #include "../model/Types.h"
 
@@ -33,5 +34,7 @@ private:
     QLineEdit*    search_;
     QLabel*       dbLabel_;
     QTimer*       filterTimer_ = nullptr;
-    std::vector<ha::Event> rows_;
+    // Модель отдаёт события как shared_ptr — те же объекты, что лежат в Store,
+    // их и передаём обратно в deleteEvent/editEvent.
+    std::vector<std::shared_ptr<ha::Event>> rows_;
 };

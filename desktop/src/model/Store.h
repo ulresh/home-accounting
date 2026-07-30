@@ -153,6 +153,10 @@ public:
     void addPerson(const std::string& name);
     void removePerson(const std::string& name);
     void upsertCatalog(const CatalogEntry& e);
+    // Удаление — перенос в раздел ["delete"] с отметкой времени: при слиянии
+    // выигрывает более поздняя отметка (см. CatalogIncrementLoader, состояния 2/3).
+    void removeCatalogItem(const std::string& category, const std::string& item);
+    void removeCatalogCategory(const std::string& category);
     void categoryMembers(std::set<std::string> &result,
 			 Catalog::const_reference category) const;
     TempEvents filter(const std::string& q) const;
@@ -265,10 +269,15 @@ struct CatalogIncrementLoader {
 };
 
 struct MonthEvents {
-    MonthEvents(Store &store) : store(store) {}
+    MonthEvents(Store &store, const std::set<RecRef> *deleted = nullptr)
+	: store(store), deleted(deleted)
+    {}
     void add(const json::value &v);
     void commit(int yyyymm);
     Store &store;
+    // Записи, удалённые {"delete":...} в ЛЮБОМ месячном файле (собраны
+    // предварительным проходом) — такие события в память не берём.
+    const std::set<RecRef> *deleted;
     Schema header;
     Store::TempEvents monthEvents;
 };

@@ -9,21 +9,25 @@
 #include <QInputDialog>
 #include <QDialogButtonBox>
 #include <QMessageBox>
-#include <algorithm>
 
 CatalogDialog::CatalogDialog(ha::Store& store, QWidget* parent)
     : QDialog(parent), store_(store) {
     setWindowTitle(tr("Редактор каталога"));
     resize(580, 430);
-    work_ = store_.catalog();
 
     cats_  = new QListWidget(this);
+    cats_->setObjectName("cats");
     items_ = new QListWidget(this);
+    items_->setObjectName("items");
 
     auto* addCat = new QPushButton(tr("+ категория"), this);
+    addCat->setObjectName("addCat");
     auto* delCat = new QPushButton(tr("− категория"), this);
+    delCat->setObjectName("delCat");
     auto* addIt  = new QPushButton(tr("+ элемент"), this);
+    addIt->setObjectName("addItem");
     auto* delIt  = new QPushButton(tr("− элемент"), this);
+    delIt->setObjectName("delItem");
 
     auto* catBtns = new QHBoxLayout();
     catBtns->addWidget(addCat); catBtns->addWidget(delCat);
@@ -46,7 +50,7 @@ CatalogDialog::CatalogDialog(ha::Store& store, QWidget* parent)
 
     auto* root = new QVBoxLayout(this);
     root->addLayout(cols, 1);
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, this);
     root->addWidget(bb);
 
     connect(addCat, &QPushButton::clicked, this, &CatalogDialog::addCategory);
@@ -54,26 +58,41 @@ CatalogDialog::CatalogDialog(ha::Store& store, QWidget* parent)
     connect(addIt,  &QPushButton::clicked, this, &CatalogDialog::addItem);
     connect(delIt,  &QPushButton::clicked, this, &CatalogDialog::removeItem);
     connect(cats_,  &QListWidget::currentRowChanged, this, [this]{ reloadItems(); });
-    connect(bb, &QDialogButtonBox::accepted, this, &CatalogDialog::apply);
-    connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(bb, &QDialogButtonBox::rejected, this, &QDialog::accept);
 
-    reloadCats(work_.empty() ? -1 : 0);
+    reloadCats();
 }
 
-int CatalogDialog::currentCat() const { return cats_->currentRow(); }
+QString CatalogDialog::currentCat() const {
+    auto* it = cats_->currentItem();
+    return it ? it->text() : QString();
+}
+QString CatalogDialog::currentItem() const {
+    auto* it = items_->currentItem();
+    return it ? it->text() : QString();
+}
 
-void CatalogDialog::reloadCats(int select) {
+void CatalogDialog::reloadCats(const QString& select) {
+    QString keep = select.isEmpty() ? currentCat() : select;
     cats_->clear();
-    for (auto& c : work_) cats_->addItem(QString::fromStdString(c.category));
-    if (select >= 0 && select < (int)work_.size()) cats_->setCurrentRow(select);
+    for (auto& [category, content] : store_.catalog())
+        cats_->addItem(QString::fromStdString(category));
+    if (cats_->count()) {
+        auto found = cats_->findItems(keep, Qt::MatchExactly);
+        cats_->setCurrentItem(found.isEmpty() ? cats_->item(0) : found.first());
+    }
     reloadItems();
 }
 
-void CatalogDialog::reloadItems() {
+void CatalogDialog::reloadItems(const QString& select) {
+    QString keep = select.isEmpty() ? currentItem() : select;
     items_->clear();
-    int r = currentCat();
-    if (r < 0 || r >= (int)work_.size()) return;
-    for (auto& it : work_[r].items) items_->addItem(QString::fromStdString(it));
+    auto cat = store_.catalog().find(currentCat().toStdString());
+    if (cat == store_.catalog().end()) return;
+    for (auto& [item, addtime] : cat->second.items)
+        items_->addItem(QString::fromStdString(item));
+    auto found = items_->findItems(keep, Qt::MatchExactly);
+    if (!found.isEmpty()) items_->setCurrentItem(found.first());
 }
 
 void CatalogDialog::addCategory() {
@@ -81,25 +100,27 @@ void CatalogDialog::addCategory() {
     QString name = QInputDialog::getText(this, tr("Новая категория"),
         tr("Название категории:"), QLineEdit::Normal, "", &ok).trimmed();
     if (!ok || name.isEmpty()) return;
-    for (auto& c : work_)
-        if (QString::fromStdString(c.category) == name) {
-            QMessageBox::information(this, tr("Каталог"), tr("Такая категория уже есть."));
-            return;
-        }
-    work_.push_back({name.toStdString(), {}});
-    reloadCats((int)work_.size() - 1);
+    if (store_.catalog().contains(name.toStdString())) {
+        QMessageBox::information(this, tr("Каталог"), tr("Такая категория уже есть."));
+        return;
+    }
+    store_.upsertCatalog({name.toStdString(), {}});
+    reloadCats(name);
 }
 
 void CatalogDialog::removeCategory() {
-    int r = currentCat();
-    if (r < 0 || r >= (int)work_.size()) return;
-    work_.erase(work_.begin() + r);
-    reloadCats(std::min(r, (int)work_.size() - 1));
+    QString cat = currentCat();
+    if (cat.isEmpty()) return;
+    auto r = QMessageBox::question(this, tr("Каталог"),
+        tr("Удалить категорию «%1» со всем содержимым?").arg(cat));
+    if (r != QMessageBox::Yes) return;
+    store_.removeCatalogCategory(cat.toStdString());
+    reloadCats();
 }
 
 void CatalogDialog::addItem() {
-    int r = currentCat();
-    if (r < 0 || r >= (int)work_.size()) {
+    QString cat = currentCat();
+    if (cat.isEmpty()) {
         QMessageBox::information(this, tr("Каталог"), tr("Сначала выберите категорию."));
         return;
     }
@@ -107,22 +128,13 @@ void CatalogDialog::addItem() {
     QString name = QInputDialog::getText(this, tr("Новый элемент"),
         tr("Наименование или название вложенной категории:"), QLineEdit::Normal, "", &ok).trimmed();
     if (!ok || name.isEmpty()) return;
-    auto& items = work_[r].items;
-    if (std::find(items.begin(), items.end(), name.toStdString()) == items.end())
-        items.push_back(name.toStdString());
-    reloadItems();
+    store_.upsertCatalog({cat.toStdString(), {name.toStdString()}});
+    reloadItems(name);
 }
 
 void CatalogDialog::removeItem() {
-    int r = currentCat();
-    if (r < 0 || r >= (int)work_.size()) return;
-    int ir = items_->currentRow();
-    if (ir < 0 || ir >= (int)work_[r].items.size()) return;
-    work_[r].items.erase(work_[r].items.begin() + ir);
+    QString cat = currentCat(), item = currentItem();
+    if (cat.isEmpty() || item.isEmpty()) return;
+    store_.removeCatalogItem(cat.toStdString(), item.toStdString());
     reloadItems();
-}
-
-void CatalogDialog::apply() {
-    store_.replaceCatalog(work_);
-    accept();
 }

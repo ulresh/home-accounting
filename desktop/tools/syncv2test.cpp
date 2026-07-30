@@ -61,8 +61,14 @@ static std::string readAllMonths(const fs::path& root, const std::string& db) {
 
 static int countSubject(Store& s, const std::string& subj) {
     int n = 0;
-    for (auto& e : s.events()) if (e.subject == subj) ++n;
+    for (auto& e : s.events()) if (e->subject == subj) ++n;
     return n;
+}
+
+// Модель отдаёт события как shared_ptr — их же принимают deleteEvent/editEvent.
+static std::shared_ptr<Event> findEvent(Store& s, const std::string& subj) {
+    for (auto& e : s.events()) if (e->subject == subj) return e;
+    return {};
 }
 
 int main() {
@@ -75,13 +81,13 @@ int main() {
         fs::path root = "/tmp/hv1/.data/home-accounting";
         Store s(root); s.load(); s.ensureIdentity();
 
-        auto e1 = s.addEvent("2026-06-10", "Кофе", 250, std::nullopt, std::string("1 шт"),
-                             std::string("из кофейни"));
-        auto e2 = s.addEvent("2026-06-11", "Чай", 120, std::nullopt, std::nullopt, std::nullopt);
+        s.addEvent("2026-06-10", "Кофе", 250, "", "1 шт", "из кофейни");
+        s.addEvent("2026-06-11", "Чай", 120, "", "", "");
+        auto e1 = findEvent(s, "Кофе");
+        auto e2 = findEvent(s, "Чай");
 
         // редактирование e2 и удаление e1
-        s.editEvent(e2, "2026-06-11", "Чай зелёный", 130, std::nullopt, std::nullopt,
-                    std::string("акция"));
+        s.editEvent(e2, "2026-06-11", "Чай зелёный", 130, "", "", "акция");
         s.deleteEvent(e1);
 
         std::string content = readAllMonths(root, "Основная");
@@ -89,7 +95,9 @@ int main() {
         check(content.find("\"reference\"") != std::string::npos, "header содержит reference");
         check(content.find("\"из кофейни\"") != std::string::npos, "комментарий записан в строку");
         check(content.find("\"this\"") != std::string::npos, "удаление содержит this");
-        check(content.find("\"update\":true") != std::string::npos, "редактирование помечено update:true");
+        // update = ссылка на НОВУЮ запись (data.txt): {"update":["<edit>",RN,DN,"<event>"]}
+        check(content.find("\"update\":[") != std::string::npos,
+              "редактирование помечено ссылкой update");
 
         // перезагрузка: e1 удалён, e2 заменён
         Store s2(root); s2.load();
@@ -98,7 +106,7 @@ int main() {
         check(countSubject(s2, "Чай зелёный") == 1, "новая версия после правки видна");
         bool gotComment = false;
         for (auto& e : s2.events())
-            if (e.subject == "Чай зелёный" && e.comment && *e.comment == "акция") gotComment = true;
+            if (e->subject == "Чай зелёный" && e->comment == "акция") gotComment = true;
         check(gotComment, "комментарий читается после перезагрузки");
     }
 
@@ -109,7 +117,7 @@ int main() {
         fs::path root = "/tmp/hv2/.data/home-accounting";
         Store s(root); s.load(); s.ensureIdentity();
         // наша запись (каноническая схема)
-        s.addEvent("2026-06-01", "Молоко", 80, std::nullopt, std::nullopt, std::nullopt);
+        s.addEvent("2026-06-01", "Молоко", 80, "", "", "");
 
         // подкладываем «чужой» файл с другим порядком колонок и reference
         fs::path odd = root / "Основная" / "2020" / "2503.jsonl";
@@ -124,12 +132,12 @@ int main() {
         Store s2(root); s2.load();
         bool bread = false, comm = false;
         for (auto& e : s2.events()) {
-            if (e.subject == "Хлеб") {
+            if (e->subject == "Хлеб") {
                 bread = true;
-                comm = (e.comment && *e.comment == "свежий");
-                check(e.cost == 55, "чужая запись: cost разобран по схеме");
-                check(e.dev_no == 9, "чужая запись: dev_no разобран по схеме");
-                check(e.event_datetime == "2025-03-01", "чужая запись: event_datetime по схеме");
+                comm = (e->comment == "свежий");
+                check(e->cost == 55, "чужая запись: cost разобран по схеме");
+                check(e->dev_no == 9, "чужая запись: dev_no разобран по схеме");
+                check(e->event_datetime == "2025-03-01", "чужая запись: event_datetime по схеме");
             }
         }
         check(bread, "событие из чужой схемы видно");
@@ -147,8 +155,8 @@ int main() {
         Store A(ra); A.load(); A.ensureIdentity();
         Store B(rb); B.load(); B.ensureIdentity();
 
-        A.addEvent("2026-06-02", "Сахар", 60, std::nullopt, std::nullopt, std::nullopt);
-        A.addEvent("2026-06-03", "Соль", 30, std::nullopt, std::nullopt, std::nullopt);
+        A.addEvent("2026-06-02", "Сахар", 60, "", "", "");
+        A.addEvent("2026-06-03", "Соль", 30, "", "", "");
         A.addPerson("Мария");
         A.upsertCatalog({"Бакалея", {"Сахар", "Соль"}});
 
@@ -170,9 +178,10 @@ int main() {
         check(r2a.received == 0 && r2b.received == 0, "повторная синхронизация без изменений: 0 принято");
 
         // A добавляет одно событие — приходит только оно (хвост)
-        A.addEvent("2026-06-04", "Перец", 90, std::nullopt, std::nullopt, std::nullopt);
+        A.addEvent("2026-06-04", "Перец", 90, "", "", "");
         auto [r3a, r3b] = sync(A, B);
-        check(r3b.received == 1, "инкремент: B принял ровно 1 новое событие");
+        check(r3b.received == 1, "инкремент: B принял ровно 1 новое событие"
+              " (принято " + std::to_string(r3b.received) + ")");
         check(countSubject(B, "Перец") == 1, "новое событие появилось у B");
 
         // B меняет людей — A получает обновление при следующей синхронизации
@@ -180,10 +189,10 @@ int main() {
         auto [r4a, r4b] = sync(A, B);
         (void)r4a; (void)r4b;
         bool aHasPetr = false;
-        for (auto& p : A.people()) if (p == "Пётр") aHasPetr = true;
+        for (auto& p : A.people()) if (p.first == "Пётр") aHasPetr = true;
         check(aHasPetr, "A получил нового человека от B");
         bool bHasMaria = false, bHasPetr = false;
-        for (auto& p : B.people()) { if (p == "Мария") bHasMaria = true; if (p == "Пётр") bHasPetr = true; }
+        for (auto& p : B.people()) { if (p.first == "Мария") bHasMaria = true; if (p.first == "Пётр") bHasPetr = true; }
         check(bHasMaria && bHasPetr, "у B итоговый список людей (Мария+Пётр)");
     }
 
@@ -196,18 +205,23 @@ int main() {
         Store A(ra); A.load(); A.ensureIdentity();
         Store B(rb); B.load(); B.ensureIdentity();
 
-        A.addEvent("2026-06-05", "Яблоки", 150, std::nullopt, std::string("1 кг"), std::nullopt);
+        A.addEvent("2026-06-05", "Яблоки", 150, "", "1 кг", "");
         sync(A, B);   // B получает DN и копию «Яблок»
         check(countSubject(B, "Яблоки") == 1, "B получил Яблоки");
 
         // B независимо заводит идентичное по содержимому событие (своё DN)
-        B.addEvent("2026-06-05", "Яблоки", 150, std::nullopt, std::string("1 кг"), std::nullopt);
+        B.addEvent("2026-06-05", "Яблоки", 150, "", "1 кг", "");
         check(countSubject(B, "Яблоки") == 2, "до синхронизации у B два одинаковых");
 
         auto [ra2, rb2] = sync(A, B);
         (void)ra2; (void)rb2;
         check(countSubject(A, "Яблоки") == 1, "после дедупликации у A одно Яблоко");
         check(countSubject(B, "Яблоки") == 1, "после дедупликации у B одно Яблоко");
+        {   // отдельно: что лежит на диске (память и файлы могут разойтись)
+            Store B2(rb); B2.load();
+            check(countSubject(B2, "Яблоки") == 1,
+                  "после дедупликации в файлах B одно Яблоко");
+        }
 
         // устойчивость: ещё одна синхронизация ничего не ломает и не плодит
         sync(A, B);
@@ -224,7 +238,8 @@ int main() {
         Store A(ra); A.load(); A.ensureIdentity();
         Store B(rb); B.load(); B.ensureIdentity();
 
-        auto ev = A.addEvent("2026-06-06", "Книга", 700, std::nullopt, std::nullopt, std::nullopt);
+        A.addEvent("2026-06-06", "Книга", 700, "", "", "");
+        auto ev = findEvent(A, "Книга");
         sync(A, B);
         check(countSubject(B, "Книга") == 1, "B получил Книгу");
 
@@ -266,7 +281,7 @@ int main() {
             Store A("/tmp/hv6b/.data/home-accounting"); A.load(); A.ensureIdentity();
             Store B("/tmp/hv6c/.data/home-accounting"); B.load(); B.ensureIdentity();
             for (int i = 0; i < 50; ++i)
-                A.addEvent("2026-06-07", "Товар" + std::to_string(i), 10 + i, std::nullopt, std::nullopt, std::nullopt);
+                A.addEvent("2026-06-07", "Товар" + std::to_string(i), 10 + i, "", "", "");
 
             SyncServer s(A);
             PairInfo info = s.listen(); info.ip = "127.0.0.1";

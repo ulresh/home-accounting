@@ -47,6 +47,15 @@ static int asInt(const json::value& v) {
     if (v.is_double()) return (int)v.as_double();
     return 0;
 }
+// boost::json разбирает неотрицательное целое как int64 (uint64 — только если
+// не влезает в int64), поэтому is_uint64()/as_uint64() к разобранным значениям
+// неприменимы.
+static bool isNum(const json::value& v) { return v.is_int64() || v.is_uint64(); }
+static uint64_t asU64(const json::value& v) {
+    if (v.is_uint64()) return v.as_uint64();
+    if (v.is_int64())  { auto i = v.as_int64(); return i < 0 ? 0 : (uint64_t)i; }
+    return 0;
+}
 
 static std::string costToStr(double c) {
     double r = std::llround(c * 100.0) / 100.0;
@@ -356,11 +365,12 @@ void Store::loadPeople() {
     people_delete.clear();
     People *p = &people_;
     readValues(dbDir() / "people.jsonl", [&](const json::value& v){
-        if(v.is_object())
+        if(v.is_object()) {
 	    for(auto &[value,time] : v.as_object())
 		if(time.is_string())
 		    p->emplace_hint(p->end(), std::string(value),
 				    std::string(time.as_string()));
+	}
 	else if(v.is_array()) {
 	    auto a = v.as_array();
 	    if(a.size() == 1 && a[0].is_string() &&
@@ -396,7 +406,7 @@ void CatalogLoader::add(const json::value &v) {
         if(v.is_object()) {
 	    for(auto &[jn,jt] : v.as_object()) if(jt.is_string()) {
 		std::string sn(jn), st(jt.as_string());
-		if(cur) cur->at(sn) = st;
+		if(cur) (*cur)[sn] = st;
 		else {
 		    auto &cat = catalog_[sn];
 		    cat.addtime = st;
@@ -531,28 +541,27 @@ void Store::read_last_edit(const T &d) {
     }
 }
 
-// ---- загрузка событий: по месяцам, удаления применяются на лету ----
+// ---- загрузка событий ----
+// Запись удаления лежит в файле месяца yyyymmOf(target.edit_datetime), а само
+// событие — в файле месяца yyyymmOf(event_datetime); это, как правило, РАЗНЫЕ
+// файлы, причём удаление обычно позже. Поэтому удаления подгружаются отдельным
+// проходом (data.txt: «Подгружать их отдельным проходом»), и только потом
+// потоково читаются события — те, что удалены, в память не попадают.
 void Store::loadEvents() {
     events_.clear(); canonicalSchemaMonths_.clear();
     lastEdit_.clear(); lastEditSeq_ = 0;
-    for (auto& [yyyymm, path] : enumerateMonths()) {
-	MonthEvents m(*this);
+
+    auto months = enumerateMonths();
+    MonthDeletions dels;
+    for (auto& [yyyymm, path] : months) dels.read(path);
+    std::set<RecRef> deleted;
+    for (auto& op : dels.ops) deleted.insert(op.del);
+
+    for (auto& [yyyymm, path] : months) {
+	MonthEvents m(*this, &deleted);
         readValues(path, [&m](const json::value& v){ m.add(v); });
 	m.commit(yyyymm);
     }
-}
-
-namespace {
-void applyDeleteFromLoad(Store::TempEvents monthEvents, const RecRef &r) {
-    for(auto &&p : monthEvents)
-	if(p->compare_delete(r)) {
-	    // будет сортировка, поэтому порядок не важен
-	    auto &b = monthEvents.back();
-	    if(p.get() != b.get()) p = b;
-	    monthEvents.resize(monthEvents.size() - 1);
-	    break;
-	}
-}
 }
 
 void MonthEvents::add(const json::value &v) {
@@ -560,9 +569,9 @@ void MonthEvents::add(const json::value &v) {
 	auto& o = v.as_object();
 	if (o.if_contains("header")) header = schemaFromHeader(o);
 	else if (!header) ;
-	else if (auto* del = o.if_contains("delete")) {
-	    RecRef d = Store::parseRef(del->as_array(), header.reference);
-	    applyDeleteFromLoad(monthEvents, d);
+	else if (o.if_contains("delete")) {
+	    // сами удаления уже собраны отдельным проходом; здесь нужен только
+	    // учёт нашего последнего edit_datetime по записи-удалению.
 	    if(auto *edit = o.if_contains("this"))
 		store.read_last_edit(Store::parseRef(edit->as_array(),
 					header.reference));
@@ -571,9 +580,13 @@ void MonthEvents::add(const json::value &v) {
     else if (!header) ;
     else if (v.is_array()) {
 	Event *ep;
-	monthEvents.emplace_back(ep = Store::parseEventArray(
+	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
 				v.as_array(), header));
 	store.read_last_edit(*ep);
+	if(deleted && deleted->contains(
+	       RecRef{ep->edit_datetime, ep->rec_no, ep->dev_no}))
+	    return;
+	monthEvents.emplace_back(std::move(eh));
     }
 }
 
@@ -741,6 +754,23 @@ void Store::upsertCatalog(const CatalogEntry &e) {
     saveCatalog();
 }
 
+void Store::removeCatalogItem(const std::string& category,
+			      const std::string& item) {
+    auto cat = catalog_.find(category);
+    if(cat == catalog_.end()) return;
+    if(!cat->second.items.erase(item)) return;
+    cat->second.deleted[item] = nowStamp();
+    saveCatalog();
+}
+
+void Store::removeCatalogCategory(const std::string& category) {
+    auto cat = catalog_.find(category);
+    if(cat == catalog_.end()) return;
+    catalog_.erase(cat);
+    catalog_delete[category] = nowStamp();
+    saveCatalog();
+}
+
 // UTF-8 нижний регистр для ASCII и кириллицы (А-Я, Ё).
 static std::string utf8Lower(const std::string& s) {
     std::string out; out.reserve(s.size());
@@ -898,31 +928,33 @@ void Store::loadSyncIndex(int peerDn, SyncIndex &idx) const {
 	else if(!header) ;
         else if(v.is_array()) {
 	    auto& a = v.as_array();
-	    if(a.size() >= 3 && a[0].is_string() && a[1].is_uint64() &&
-	       a[2].is_string()) {
+	    if(a.empty()) return;
+	    if(a[0].is_string()) {
 		auto s = a[0].as_string();
-		FileState *p;
-		if(s == "device") p = &idx.device;
-		else if(s == "device-map") {
-		    for(int r = 1, l = 2; l < a.size(); ++r, ++l)
-			if(a[r].is_uint64() && a[l].is_uint64())
-			    idx.dnMap[a[r].as_uint64()] = a[l].as_uint64();
+		// ["device-map",remote,local,...] — пары, шаг 2.
+		if(s == "device-map") {
+		    for(std::size_t r = 1, l = 2; l < a.size(); r += 2, l += 2)
+			if(isNum(a[r]) && isNum(a[l]))
+			    idx.dnMap[asInt(a[r])] = asInt(a[l]);
 		    idx.empty = false;
 		    return;
 		}
+		if(a.size() < 3 || !isNum(a[1]) || !a[2].is_string()) return;
+		FileState *p;
+		if(s == "device") p = &idx.device;
 		else if(s == "people") p = &idx.people;
 		else if(s == "catalog") p = &idx.catalog;
 		else return;
 		idx.empty = false;
-		p->size = a[1].as_int64();
+		p->size = asU64(a[1]);
 		p->sha1 = a[2].as_string();
 	    }
-	    else if (a.size() >= 2 && a[0].is_uint64() && a[1].is_uint64()) {
+	    else if (a.size() >= 2 && isNum(a[0]) && isNum(a[1])) {
 		idx.empty = false;
 		if(a.size() >= 3 && a[2].is_object())
-		    idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
+		    idx.events[asInt(a[0])] = { asU64(a[1]),
 			schemaFromHeader(a[2].as_object()) };
-		else idx.events[a[0].as_uint64()] = { a[1].as_uint64(),
+		else idx.events[asInt(a[0])] = { asU64(a[1]),
 			// header здесь именно копируется, std::move нельзя
 						      header };
 	    }
