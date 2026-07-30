@@ -1200,3 +1200,59 @@ json::value withOurDevNoDel(const json::value &v, const Schema &header, const Sy
 Остальные 4 красных прежние: счётчик `received` и дедупликация у клиента.
 
 Чистая пересборка прошла, релиз 1 075 064 байта, md5 сверены, `scratch` на хосте убран. `CLAUDE.md` обновил.
+
+
+
+
+==== CLAUDE folder=home-accounting session=03ac48c1-afe1-413b-8689-ac1d73089584 sessionId=03ac48c1-afe1-413b-8689-ac1d73089584 | отправлено 2026-07-30 17:13:11 | завершено 2026-07-30 17:22:56 ====
+Положил проверенный воспроизводитель в `desktop/tools/relaycrash.cpp` (в CMake не добавлял, собирается вручную; можно удалить, когда не нужен).
+
+## Как запустить
+
+```bash
+cd desktop && tar czf - tools | ssh appbuild 'cd /home/builder/project/home-accounting/desktop && tar xzf -'
+
+ssh appbuild 'cd /home/builder/project/home-accounting/desktop && \
+  g++ -std=c++20 -g -I src -I /usr/local/include -o relaycrash \
+      tools/relaycrash.cpp src/model/Store.cpp src/model/Jsonl.cpp \
+      src/model/Paths.cpp src/sync/Crypto.cpp src/sync/SyncService.cpp \
+      src/sync/QrCode.cpp \
+      -L/usr/local/lib -lboost_json -lssl -lcrypto -lpthread && \
+  LD_LIBRARY_PATH=/usr/local/lib timeout 60 ./relaycrash'
+```
+
+Вывод сейчас:
+
+```
+1. sync A-B
+2. sync B-C
+3. delete on A
+4. sync A-B
+free(): invalid pointer
+rc=134
+```
+
+Со стеком — та же команда плюс `-fsanitize=address` и `ASAN_OPTIONS=detect_leaks=0`:
+
+```
+#10 ha::Schema::~Schema()            src/model/Store.h:83
+#11 ha::MonthSyncData::~MonthSyncData()  src/model/Store.h:100
+#12 aSendAllIncrement                src/sync/SyncService.cpp:662
+```
+
+Строка 662 — закрывающая скобка `aSendAllIncrement`, то есть разрушается временный `MonthSyncData`, размещённый компилятором в кадре корутины, с уже негодным `Schema`.
+
+## Что делает сценарий
+
+Три хранилища в подпапках `./relaycrash-data`. У C заранее заняты DN 1–3 (`addDevice("PUBKEY-X")`, `PUBKEY-Y`) — чтобы при сопряжении пришлось перенумеровывать. Событие рождается у A, доезжает до C через B, потом A его удаляет и снова синхронизируется с B. Падает четвёртый шаг — второй A↔B, где B выступает клиентом и вызывает `aSendAllIncrement`.
+
+Путь к данным можно задать аргументом: `./relaycrash /tmp/xxx`. По умолчанию каталог создаётся рядом с бинарём и остаётся после падения — можно посмотреть, что успело записаться.
+
+## Что я уже проверял
+
+- Без моей правки dnMap падает так же — собирал `SyncService.cpp` с `out << json::serialize(v)` вместо `withOurDevNo*`.
+- С исходным `DvCMD` (до правки висячего `av`) — тоже падает, только раньше, на шаге 2, по другой причине (там был `heap-use-after-free` на `ao`).
+- Перенос range-for `store.enumerateMonths()` в именованную переменную и результатов `co_await` из составных выражений в локальные — не помогло, эти правки я откатил.
+- Приём `const MonthSyncData &peer` по значению вместо ссылки в `aStreamEventFile` — тоже не помогло.
+
+Пара A↔C с той же перенумерацией DN проходит чисто под ASan, так что дело именно в третьем звене — у B при втором обмене одновременно непустые `idxOld`, `idxCur` и `idxNew`, и в цикле по месяцам срабатывает ветка с `peer->second = co_await aStreamEventFile(...)`.
