@@ -815,7 +815,8 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     if(!mdels.ops.contains(op)) {
 	// TODO +++ dnMap
 	out << json::serialize(v) << std::endl;
-	auto p = store.events_.find(&d);
+	// Искать по op.del: d уже перемещён в op и обнулён (строки пусты).
+	auto p = store.events_.find(&op.del);
 	if(p != store.events_.end()) store.events_.erase(p);
     }
 	    }
