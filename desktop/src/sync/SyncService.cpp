@@ -180,10 +180,11 @@ struct Session : std::enable_shared_from_this<Session> {
     bool completed = false;
 
     // ---------- приём ----------
-    std::string rbuf;
+    QByteArray rbuf;
+    qsizetype rbuf_pos = 0;
     enum Pending { PendNone, PendLine, PendBlock };
     Pending pending = PendNone;
-    std::function<void(std::string&&)> lineCb;
+    Cont lineCb;
     std::size_t blockLeft = 0;
     json::stream_parser sp;
     std::function<void(const json::value&)> blockSink;
@@ -308,7 +309,7 @@ struct Session : std::enable_shared_from_this<Session> {
     }
 
     // -------------------------------------------------- чтение
-    void readLine(std::function<void(std::string&&)> cb) {
+    void readLine(Cont cb) {
         lineCb = std::move(cb);
         pending = PendLine;
         pump();
@@ -328,15 +329,35 @@ struct Session : std::enable_shared_from_this<Session> {
     void onReadyRead() {
         if (completed || !sock) return;
         QByteArray ba = sock->readAll();
-        if (!ba.isEmpty()) rbuf.append(ba.constData(), (std::size_t)ba.size());
+        if(!ba.isEmpty()) {
+	    if(rbuf_pos == rbuf.size()) { rbuf = ba; rbuf_pos = 0; }
+	    else if(!rbuf_pos) rbuf.append(ba);
+	    else { rbuf = rbuf.sliced(rbuf_pos) + ba; rbuf_pos = 0; }
+	}
         pump();
     }
 
     // Скормить парсеру то, что уже пришло. true — блок дочитан целиком.
+    bool feedLine() {
+        if(rbuf_pos < rbuf.size()) {
+	    auto n = rbuf.size() - rbuf_pos;
+            const char* p = rbuf.constData() + rbuf_pos;
+	    auto consumed = sp.write_some(p, n);
+	    rbuf_pos += consumed;
+	    if (!sp.done()) return false;      // весь остаток скормлен
+	    av = sp.release();
+	    sp.reset();
+	    return true;
+	}
+	return false;
+    }
+
+    // Скормить парсеру то, что уже пришло. true — блок дочитан целиком.
     bool feedBlock() {
-        while (blockLeft && !rbuf.empty()) {
-            std::size_t n = std::min<std::size_t>(blockLeft, rbuf.size());
-            const char* p = rbuf.data();
+        while (blockLeft && (rbuf_pos < rbuf.size())) {
+	    auto n = rbuf.size() - rbuf_pos;
+	    if(n > blockLeft) n = blockLeft;
+            const char* p = rbuf.constData() + rbuf_pos;
             std::size_t left = n;
             while (left) {
                 auto consumed = sp.write_some(p, left);
@@ -347,13 +368,13 @@ struct Session : std::enable_shared_from_this<Session> {
                 blockSink(v);
             }
             if (left) throw std::runtime_error("bad protocol"s);
-            rbuf.erase(0, n);
+	    rbuf_pos += n;
             blockLeft -= n;
         }
-        if (blockLeft) return false;
-        if (rbuf.empty()) return false;
-        if (rbuf[0] != '\n') throw std::runtime_error("bad protocol"s);
-        rbuf.erase(0, 1);
+        if(blockLeft) return false;
+        if(rbuf_pos == rbuf.size()) return false;
+        if(rbuf[rbuf_pos] != '\n') throw std::runtime_error("bad protocol"s);
+	++rbuf_pos;
         return true;
     }
 
@@ -364,15 +385,13 @@ struct Session : std::enable_shared_from_this<Session> {
         for (;;) {
             if (completed) break;
             if (pending == PendLine) {
-                auto nl = rbuf.find('\n');
-                if (nl == std::string::npos) break;
-                std::string line = rbuf.substr(0, nl);
-                rbuf.erase(0, nl + 1);
-                if (!line.empty() && line.back() == '\r') line.pop_back();
+                bool ready = false;
+                if (!call([&] { ready = feedLine(); })) break;
+                if (!ready) break;           // ждём данных из сокета
                 pending = PendNone;
-                auto cb = std::move(lineCb);
-                lineCb = nullptr;
-                if (!call([&] { cb(std::move(line)); })) break;
+		auto cb = std::move(lineCb);
+		lineCb = nullptr;
+                if (!call([&] { cb(); })) break;
                 continue;                    // продолжение могло заказать ещё чтение
             }
             if (pending == PendBlock) {
@@ -441,8 +460,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     // -------------------------------------------------- команды протокола
     void cmdNext(Cont cb) {
-        readLine([this, cb](std::string&& line) {
-            av = json::parse(line);
+        readLine([this, cb]() {
             ao = &av.as_array();
             cmd = std::string(ao->at(0).as_string());
             cb();
@@ -1044,9 +1062,8 @@ struct Session : std::enable_shared_from_this<Session> {
     Cont onElected;                 // верный код: закрыть слушателя и остальных
 
     void serverGo() {
-        readLine([this](std::string&& line) {
-            auto hv = json::parse(line);
-            auto& h = hv.as_array();
+        readLine([this]() {
+            auto& h = av.as_array();
             std::string clientCode(h.at(0).as_string());
             std::string clientDb(h.at(1).as_string());
             bool clientEmpty = h.size() > 2 && h[2].as_string() == "empty"sv;
