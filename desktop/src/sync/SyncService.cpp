@@ -862,6 +862,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	else {
 	    auto p = store.events_.lower_bound(eh);
 	    if(p != store.events_.end() && p->get()->eq_edit(*ep)) return;
+	    /* TODO +++ до решения вопросов с размещением delete адекватней будет исключить весь блок
 	    for(auto a = p, b = store.events_.begin(); a != b;) {
 		--a;
 		if(a->get()->event_datetime != ep->event_datetime) break;
@@ -870,6 +871,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    for(auto a = p, e = store.events_.end();
 		a != e && a->get()->event_datetime == ep->event_datetime;
 		++a) if(a->get()->eq_data(*ep)) return;
+	    */
 	    store.events_.insert(p, eh);
 	}
 	out << json::serialize(withOurDevNo(v, header, dnMap))
