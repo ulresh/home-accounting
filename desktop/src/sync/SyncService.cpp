@@ -211,10 +211,15 @@ struct Session : std::enable_shared_from_this<Session> {
     SyncIndex idx, idxCur, idxNew;
 
     // -------------------------------------------------- подключение сокета
+    // Любой обработчик может (через продолжения) завершить сеанс, а вместе с ним
+    // снять последнюю ссылку на нас — например, когда кандидат вычёркивается из
+    // списка ожидающих. Поэтому каждая точка входа из Qt держит self: объект
+    // доживёт до возврата в цикл событий.
     void attach(QSslSocket* s, Cont onReady) {
         sock = s;
         conns.push_back(QObject::connect(s, &QSslSocket::encrypted, s,
             [this, onReady] {
+                auto self = shared_from_this();
                 if (completed) return;
                 peer = peerPubkeyOf(sock);
                 if (peer.empty()) { fail("no peer certificate"s); return; }
@@ -229,11 +234,13 @@ struct Session : std::enable_shared_from_this<Session> {
             [this](qint64) { pumpWrite(); }));
         conns.push_back(QObject::connect(s, &QAbstractSocket::disconnected, s,
             [this] {
+                auto self = shared_from_this();
                 onReadyRead();               // дочитать то, что успело прийти
                 fail("connection closed"s);
             }));
         conns.push_back(QObject::connect(s, &QAbstractSocket::errorOccurred, s,
             [this](QAbstractSocket::SocketError) {
+                auto self = shared_from_this();
                 fail(sock ? sock->errorString().toStdString() : "socket error"s);
             }));
     }
@@ -279,6 +286,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     void cancel() {
         if (completed) return;
+        auto self = shared_from_this();
         cancelled = true;
         fail("cancelled"s);
     }
@@ -344,6 +352,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     void pump() {
         if (inPump || completed) return;
+        auto self = shared_from_this();      // цикл ниже переживёт завершение сеанса
         inPump = true;
         for (;;) {
             if (completed) break;
@@ -390,6 +399,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     void pumpWrite() {
         if (completed || !sock || inWrite) return;
+        auto self = shared_from_this();
         inWrite = true;
         while (!outq.empty()) {
             if (sock->bytesToWrite() >= kHighWater) { inWrite = false; return; }
@@ -1024,6 +1034,7 @@ struct Session : std::enable_shared_from_this<Session> {
     //     Протокол: сервер
     // ============================================================
     std::string code;               // ожидаемый код сопряжения
+    Cont onElected;                 // верный код: закрыть слушателя и остальных
 
     void serverGo() {
         readLine([this](std::string&& line) {
@@ -1035,11 +1046,15 @@ struct Session : std::enable_shared_from_this<Session> {
             res.peerDb = clientDb;
 
             if (clientCode != code) {
+                // Постороннее подключение: вежливо отказываем и закрываемся,
+                // но сервер продолжает ждать настоящего партнёра.
                 res.error = "bad_code";
                 send(R"(["error","bad_code"])" "\n"s);
                 flush([this] { finish(); });
                 return;
             }
+            // Код верный — этот сеанс и есть партнёр.
+            if (onElected) { auto f = std::move(onElected); onElected = nullptr; f(); }
             if (clientDb != store.database()) {
                 res.error = "db_mismatch";
                 json::array e;
@@ -1175,7 +1190,12 @@ struct SyncServer::Impl {
     explicit Impl(Store& s) : store(s) {}
     Store& store;
     Listener listener;
-    std::shared_ptr<Session> session;
+    QSslConfiguration sslConf;
+    // До верного кода подключений может быть сколько угодно: любой сканер портов
+    // или чужой клиент занял бы единственный слот. Все они — кандидаты, и лишь
+    // приславший верный код становится сеансом.
+    std::vector<std::shared_ptr<Session>> pending;
+    std::shared_ptr<Session> winner;
     std::string code;
     ConfirmFn confirm;
     DoneFn done;
@@ -1183,13 +1203,42 @@ struct SyncServer::Impl {
     bool reported = false;
 
     // Результат отдаём ровно один раз — в том числе если отменили ещё до того,
-    // как кто-то подключился (сессии тогда просто нет).
+    // как подключился настоящий партнёр (сеанса тогда просто нет).
     void report(const SyncResult& r) {
         if (reported) return;
         reported = true;
         auto cb = std::move(done);
         done = nullptr;
         if (cb) cb(r);
+    }
+
+    // Кандидат отвалился (неверный код, разрыв, сбой TLS) — просто забыть его.
+    void drop(Session* s) {
+        for (auto it = pending.begin(); it != pending.end(); ++it)
+            if (it->get() == s) {
+                auto keep = *it;         // не разрушить сеанс под собственным вызовом
+                pending.erase(it);
+                return;
+            }
+    }
+
+    // Пришёл верный код: слушателя закрыть, остальных кандидатов оборвать молча.
+    void elect(Session* s) {
+        listener.close();
+        auto others = std::move(pending);
+        pending.clear();
+        for (auto& p : others) {
+            if (p.get() == s) { winner = p; continue; }
+            p->done = nullptr;           // о проигравших наверх не сообщаем
+            p->cancel();
+        }
+    }
+
+    // Оборвать всех кандидатов (отмена/разрушение сервера).
+    void dropAll() {
+        auto others = std::move(pending);
+        pending.clear();
+        for (auto& p : others) { p->done = nullptr; p->cancel(); }
     }
 };
 
@@ -1198,33 +1247,26 @@ SyncServer::~SyncServer() { cancel(); }
 
 PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
     Impl* d = d_.get();
+    d->sslConf = makeConfig(d->store);       // одна на все подключения
     // Обработчик ставим ДО listen(): иначе между «порт занят» и «есть кому
     // разбирать подключение» остаётся окно (его и приходилось затыкать
     // pauseAccepting).
     d->listener.onConn = [d](qintptr fd) {
-        if (d->session) { ::close((int)fd); return; }
+        auto* s = new QSslSocket();
+        s->setSslConfiguration(d->sslConf);
+        if (!s->setSocketDescriptor(fd)) { delete s; ::close((int)fd); return; }
         auto sess = std::make_shared<Session>(d->store);
-        d->session = sess;
         sess->confirm = d->confirm;
         sess->code = d->code;
-        sess->done = [d](const SyncResult& r) { d->report(r); };
-        auto* s = new QSslSocket();
-        try {
-            s->setSslConfiguration(makeConfig(d->store));
-        } catch (const std::exception& e) {
-            delete s;
-            sess->res.error = e.what();
-            sess->finish();
-            return;
-        }
-        if (!s->setSocketDescriptor(fd)) {
-            delete s;
-            sess->res.error = "bad socket";
-            sess->finish();
-            return;
-        }
-        d->listener.close();                 // ждём ровно одно подключение
         Session* p = sess.get();
+        // Пока код не пришёл — это лишь кандидат: его провал не завершает
+        // работу сервера, а только вычёркивает его из списка.
+        sess->done = [d, p](const SyncResult& r) {
+            if (d->winner.get() == p) d->report(r);
+            else d->drop(p);
+        };
+        sess->onElected = [d, p] { d->elect(p); };
+        d->pending.push_back(sess);
         sess->attach(s, [p] { p->serverGo(); });
         s->startServerEncryption();
     };
@@ -1247,12 +1289,11 @@ PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
 void SyncServer::cancel() {
     d_->cancelled = true;
     d_->listener.close();
-    if (d_->session) d_->session->cancel();   // сессия сама вызовет report()
-    else {
-        SyncResult r;
-        r.error = "cancelled";
-        d_->report(r);
-    }
+    d_->dropAll();
+    if (d_->winner) d_->winner->cancel();     // сеанс сам вызовет report()
+    SyncResult r;
+    r.error = "cancelled";
+    d_->report(r);                            // no-op, если сеанс уже отчитался
 }
 
 // ============================================================

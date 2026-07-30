@@ -12,6 +12,7 @@
 
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QTcpSocket>
 #include <QTimer>
 
 #include <iostream>
@@ -588,20 +589,26 @@ int main(int argc, char** argv) {
         Store B(rb); B.load(); B.ensureIdentity();
         B.addEvent("2026-11-02", "Перец", 30, "", "", "");
 
-        {   // (а) клиент пришёл с неверным кодом
+        {   // (а) клиент пришёл с неверным кодом: ему отказ, а сервер ждёт дальше
             SyncServer s(A);
             SyncResult r1, r2;
-            int done = 0;
-            PairInfo info = s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            int srvDone = 0;
+            bool cliDone = false;
+            PairInfo info = s.start(YES,
+                    [&](const SyncResult& r) { r1 = r; ++srvDone; });
             info.ip = "127.0.0.1";
-            info.code = "WRONGCOD";
+            PairInfo bad = info;
+            bad.code = "WRONGCOD";
             SyncClient c(B);
-            c.start(info, YES, [&](const SyncResult& r) { r2 = r; ++done; });
-            spin([&] { return done == 2; }, 5000);
-            check(done == 2, "обе стороны завершились");
+            c.start(bad, YES, [&](const SyncResult& r) { r2 = r; cliDone = true; });
+            spin([&] { return cliDone; }, 5000);
             check(r2.error == "bad_code",
                   "клиент получил отказ по коду (" + r2.error + ")");
-            check(!r1.ok && !r2.ok, "синхронизация не выполнена");
+            check(!r2.ok, "синхронизация не выполнена");
+            check(srvDone == 0, "сервер продолжает ждать настоящего партнёра");
+            s.cancel();
+            spin([&] { return srvDone == 1; }, 3000);
+            check(srvDone == 1 && !r1.ok, "сервер завершается по отмене");
         }
         {   // (б) у сторон разные базы
             B.switchDatabase("Другая", true);
@@ -620,6 +627,73 @@ int main(int argc, char** argv) {
                   "вместе с отказом пришло имя базы партнёра (" + r2.peerDb + ")");
             check(countSubject(B, "Соль") == 0, "события чужой базы не приняты");
         }
+    }
+
+    // ====== 9. Посторонние подключения не занимают сервер ======
+    {
+        std::cout << "== 9. посторонние подключения ==\n";
+        fs::remove_all("/tmp/hv9a"); fs::remove_all("/tmp/hv9b");
+        fs::remove_all("/tmp/hv9c");
+        fs::path ra = "/tmp/hv9a/.data/home-accounting";
+        fs::path rb = "/tmp/hv9b/.data/home-accounting";
+        fs::path rc = "/tmp/hv9c/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+        Store C(rc); C.load(); C.ensureIdentity();
+        A.addEvent("2026-12-01", "Ёлка", 1500, "", "", "");
+
+        SyncResult ra_, rb_;
+        int done = 0;
+        SyncServer s(A);
+        PairInfo info = s.start(YES, [&](const SyncResult& r) { ra_ = r; ++done; });
+        info.ip = "127.0.0.1";
+
+        // (1) кто-то подключился и молчит (сканер портов, чужая программа)
+        QTcpSocket mute;
+        mute.connectToHost("127.0.0.1", (quint16)info.port);
+        // (2) кто-то шлёт мусор вместо TLS
+        QTcpSocket junk;
+        junk.connectToHost("127.0.0.1", (quint16)info.port);
+        spin([&] { return mute.state() == QAbstractSocket::ConnectedState &&
+                          junk.state() == QAbstractSocket::ConnectedState; }, 5000);
+        check(mute.state() == QAbstractSocket::ConnectedState &&
+              junk.state() == QAbstractSocket::ConnectedState,
+              "посторонние подключения приняты, а не отвергнуты");
+        junk.write("GET / HTTP/1.0\r\n\r\n");
+        junk.flush();
+
+        // (3) настоящий клиент, но с неверным кодом
+        PairInfo bad = info;
+        bad.code = "WRONGCOD";
+        SyncResult rbad;
+        bool badDone = false;
+        SyncClient cbad(C);
+        cbad.start(bad, YES, [&](const SyncResult& r) { rbad = r; badDone = true; });
+        spin([&] { return badDone; }, 5000);
+        check(rbad.error == "bad_code", "чужому клиенту отказано по коду (" +
+              rbad.error + ")");
+        check(done == 0, "сервер не завершился из-за посторонних");
+
+        // (4) и только теперь — настоящий партнёр
+        SyncClient c(B);
+        c.start(info, YES, [&](const SyncResult& r) { rb_ = r; ++done; });
+        spin([&] { return done == 2; }, 10000);
+        check(ra_.ok && rb_.ok, "сопряжение с верным кодом прошло (" +
+              ra_.error + rb_.error + ")");
+        check(countSubject(B, "Ёлка") == 1, "B получил событие A");
+
+        // после выбора партнёра слушатель и остальные подключения закрыты
+        spin([&] { return mute.state() != QAbstractSocket::ConnectedState &&
+                          junk.state() != QAbstractSocket::ConnectedState; }, 5000);
+        check(mute.state() != QAbstractSocket::ConnectedState,
+              "молчащее подключение закрыто после сопряжения");
+        check(junk.state() != QAbstractSocket::ConnectedState,
+              "мусорное подключение закрыто после сопряжения");
+        QTcpSocket late;
+        late.connectToHost("127.0.0.1", (quint16)info.port);
+        spin([&] { return late.state() == QAbstractSocket::UnconnectedState; }, 5000);
+        check(late.state() != QAbstractSocket::ConnectedState,
+              "порт больше не слушает");
     }
 
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
