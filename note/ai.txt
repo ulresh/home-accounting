@@ -640,12 +640,28 @@ ai-r.txt
 
 !2026-07-30 17:54:37
 
-CLAUDE SINGLE DEFAULT folder=home-accounting ENABLE-ALL
+В SyncService замени boost::asio на QT.
+Используй QSslSocket.
+Используй единый app.exec, убери отдельный thread.
+Протестируй. Приложение под андроид пока не трогай.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=03ac48c1-afe1-413b-8689-ac1d73089584 sessionId=03ac48c1-afe1-413b-8689-ac1d73089584 | отправлено 2026-07-30 18:05:40 | завершено 2026-07-30 18:14:25 ====
+
+Также убери корутины. Замени их на callback'и.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=03ac48c1-afe1-413b-8689-ac1d73089584 sessionId=03ac48c1-afe1-413b-8689-ac1d73089584 | отправлено 2026-07-30 18:18:16 | завершено 2026-07-30 18:20:06 ====
+
+
+
+CLAUDE SINGLE DEFAULT folder=home-accounting session= ENABLE-ALL
 
 В SyncService замени boost::asio на QT.
 Используй QSslSocket.
 Используй единый app.exec, убери отдельный thread.
-
+Также убери корутины. Замени их на callback'и.
+Протестируй. Приложение под андроид пока не трогай.
 
 
 
