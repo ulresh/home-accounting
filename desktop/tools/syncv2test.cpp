@@ -10,6 +10,10 @@
 #include "../src/model/Paths.h"
 #include "../src/sync/SyncService.h"
 
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
+
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -17,7 +21,6 @@
 #include <iterator>
 #include <set>
 #include <string>
-#include <thread>
 #include <chrono>
 #include <unistd.h>
 
@@ -33,17 +36,30 @@ static void check(bool ok, const std::string& msg) {
 
 static auto YES = [](const std::string&) { return true; };
 
-// Полная синхронизация: A — сервер, B — клиент.
+// Прокрутить главный цикл, пока не выполнится условие (или не выйдет время).
+static void spin(const std::function<bool()>& ready, int limitMs = 20000) {
+    QEventLoop loop;
+    QTimer tick;
+    QObject::connect(&tick, &QTimer::timeout, [&] {
+        if (ready()) loop.quit();
+    });
+    tick.start(5);
+    QTimer::singleShot(limitMs, &loop, &QEventLoop::quit);
+    if (!ready()) loop.exec();
+}
+
+// Полная синхронизация: A — сервер, B — клиент. Потоков нет: обе стороны
+// работают в одном цикле событий, как в приложении (app.exec).
 static std::pair<SyncResult,SyncResult> sync(Store& A, Store& B) {
     SyncServer s(A);
     PairInfo info = s.listen();
     info.ip = "127.0.0.1";
-    SyncResult ra;
-    std::thread ts([&] { ra = s.wait(YES); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    SyncResult ra, rb;
+    int done = 0;
+    s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
     SyncClient c(B);
-    SyncResult rb = c.connect(info, YES);
-    ts.join();
+    c.start(info, YES, [&](const SyncResult& r) { rb = r; ++done; });
+    spin([&] { return done == 2; });
     return {ra, rb};
 }
 
@@ -96,8 +112,9 @@ static std::shared_ptr<Event> findEvent(Store& s, const std::string& subj) {
     return {};
 }
 
-int main() {
+int main(int argc, char** argv) {
     alarm(60);
+    QCoreApplication app(argc, argv);
 
     // ============ 1. Поле comment, формат удаления/редактирования ============
     {
@@ -475,21 +492,22 @@ int main() {
     {
         std::cout << "== 6. прерывание синхронизации ==\n";
 
-        // (а) cancel во время ожидания подключения (async accept).
+        // (а) cancel во время ожидания подключения.
         {
             fs::remove_all("/tmp/hv6a");
             Store A("/tmp/hv6a/.data/home-accounting"); A.load(); A.ensureIdentity();
             SyncServer s(A);
             s.listen();
             SyncResult r;
+            bool done = false;
+            QObject ctx;                  // умрёт вместе с областью — снимет таймер
             auto t0 = std::chrono::steady_clock::now();
-            std::thread t([&]{ r = s.wait(YES); });
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            s.cancel();
-            t.join();
+            s.start(YES, [&](const SyncResult& x) { r = x; done = true; });
+            QTimer::singleShot(150, &ctx, [&] { s.cancel(); });
+            spin([&] { return done; }, 3000);
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - t0).count();
-            check(!r.ok, "ожидание прервано (не выполнено)");
+            check(done && !r.ok, "ожидание прервано (не выполнено)");
             check(ms < 2000, "прерывание сработало быстро, без зависания");
         }
 
@@ -504,14 +522,107 @@ int main() {
             SyncServer s(A);
             PairInfo info = s.listen(); info.ip = "127.0.0.1";
             SyncResult ra, rb;
-            std::thread ts([&]{ ra = s.wait(YES); });
-            std::thread tc([&]{ SyncClient c(B); rb = c.connect(info, YES); });
-            std::this_thread::sleep_for(std::chrono::milliseconds(60));
-            s.cancel();                       // прервать сервер посреди обмена
-            ts.join(); tc.join();
+            int done = 0;
+            s.start(YES, [&](const SyncResult& r) { ra = r; ++done; });
+            SyncClient c(B);
+            c.start(info, YES, [&](const SyncResult& r) { rb = r; ++done; });
+            QObject ctx;                  // умрёт вместе с областью — снимет таймер
+            QTimer::singleShot(60, &ctx, [&] { s.cancel(); });  // прервать посреди обмена
+            spin([&] { return done == 2; }, 5000);
             // Главное требование: прерывание срабатывает и нет зависания/краша.
-            check(true, "обмен прерван без зависания/краша (server ok=" +
+            check(done == 2, "обмен прерван без зависания/краша (server ok=" +
                         std::to_string(ra.ok) + ")");
+        }
+    }
+
+    // ====== 7. Большой объём: многоблочная потоковая передача ======
+    {
+        std::cout << "== 7. большой объём (многоблочный поток) ==\n";
+        fs::remove_all("/tmp/hv7a"); fs::remove_all("/tmp/hv7b");
+        fs::path ra = "/tmp/hv7a/.data/home-accounting";
+        fs::path rb = "/tmp/hv7b/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+
+        // Заведомо больше одного блока (64 КБ) и больше порога отправки (256 КБ),
+        // чтобы задействовать и дробление файла при записи в сокет, и разбор
+        // значения, разорванного между блоками приёма.
+        const int N = 20000;
+        for (int i = 0; i < N; ++i)
+            A.addEvent("2026-10-05", "Позиция" + std::to_string(i), 1 + i % 97,
+                       "", "", "комментарий подлиннее для объёма " + std::to_string(i));
+        auto size = fs::file_size(ra / "Основная" / "2020" / "2610.jsonl");
+        check(size > 512 * 1024, "файл событий больше 512 КБ (" +
+              std::to_string(size / 1024) + " КБ)");
+
+        auto [r7a, r7b] = sync(A, B);
+        check(r7a.ok && r7b.ok, "синхронизация большого объёма прошла");
+        check((int)B.events().size() == N,
+              "B получил все события (" + std::to_string(B.events().size()) +
+              " из " + std::to_string(N) + ")");
+        check(fs::file_size(rb / "Основная" / "2020" / "2610.jsonl") == size,
+              "месячный файл B побайтно того же размера");
+        Store B2(rb); B2.load();
+        check((int)B2.events().size() == N, "после перезагрузки B события на месте");
+
+        // Инкремент поверх большого файла: одно новое событие.
+        A.addEvent("2026-10-06", "Хвост", 5, "", "", "");
+        auto [r7c, r7d] = sync(A, B);
+        (void)r7c;
+        // Передаётся только хвост, а не весь файл заново (в счётчик попадает
+        // ещё и строка заголовка схемы — см. известные красные тесты п.3).
+        check(r7d.received > 0 && r7d.received <= 2,
+              "инкремент поверх большого файла: принято " +
+              std::to_string(r7d.received) + " (не весь файл)");
+        check(countSubject(B, "Хвост") == 1, "хвостовое событие дошло до B");
+    }
+
+    // ====== 8. Отказы сопряжения: неверный код и разные базы ======
+    // Заодно проверка того, что последнее сообщение сервера успевает уйти
+    // до закрытия соединения.
+    {
+        std::cout << "== 8. неверный код и разные базы ==\n";
+        fs::remove_all("/tmp/hv8a"); fs::remove_all("/tmp/hv8b");
+        fs::path ra = "/tmp/hv8a/.data/home-accounting";
+        fs::path rb = "/tmp/hv8b/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        A.addEvent("2026-11-01", "Соль", 20, "", "", "");
+        Store B(rb); B.load(); B.ensureIdentity();
+        B.addEvent("2026-11-02", "Перец", 30, "", "", "");
+
+        {   // (а) клиент пришёл с неверным кодом
+            SyncServer s(A);
+            PairInfo info = s.listen();
+            info.ip = "127.0.0.1";
+            info.code = "WRONGCOD";
+            SyncResult r1, r2;
+            int done = 0;
+            s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            SyncClient c(B);
+            c.start(info, YES, [&](const SyncResult& r) { r2 = r; ++done; });
+            spin([&] { return done == 2; }, 5000);
+            check(done == 2, "обе стороны завершились");
+            check(r2.error == "bad_code",
+                  "клиент получил отказ по коду (" + r2.error + ")");
+            check(!r1.ok && !r2.ok, "синхронизация не выполнена");
+        }
+        {   // (б) у сторон разные базы
+            B.switchDatabase("Другая", true);
+            SyncServer s(A);
+            PairInfo info = s.listen();
+            info.ip = "127.0.0.1";
+            SyncResult r1, r2;
+            int done = 0;
+            s.start(YES, [&](const SyncResult& r) { r1 = r; ++done; });
+            SyncClient c(B);
+            c.start(info, YES, [&](const SyncResult& r) { r2 = r; ++done; });
+            spin([&] { return done == 2; }, 5000);
+            check(done == 2, "обе стороны завершились");
+            check(r2.error == "db_mismatch",
+                  "клиент получил db_mismatch (" + r2.error + ")");
+            check(r2.peerDb == "Основная",
+                  "вместе с отказом пришло имя базы партнёра (" + r2.peerDb + ")");
+            check(countSubject(B, "Соль") == 0, "события чужой базы не приняты");
         }
     }
 

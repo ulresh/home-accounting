@@ -1,7 +1,5 @@
 #pragma once
 #include <QDialog>
-#include <thread>
-#include <atomic>
 #include <memory>
 #include "../sync/SyncService.h"
 
@@ -14,6 +12,8 @@ class QPlainTextEdit;
 
 namespace ha { class Store; }
 
+// Синхронизация идёт в главном цикле событий: отдельного потока нет,
+// результат приходит callback'ом из ha::SyncServer / ha::SyncClient.
 class SyncDialog : public QDialog {
     Q_OBJECT
 public:
@@ -23,18 +23,15 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override;
 
-signals:
-    void serverReady(QString infoJson);
-    void finished(bool ok, QString message, QString error, QString peerDb);
-
 private slots:
     void startServer();
     void startClient();
-    void onServerReady(QString infoJson);
-    void onFinished(bool ok, QString message, QString error, QString peerDb);
 
 private:
-    bool askConfirm(const QString& pubkey);   // блокирующий вызов из рабочего потока
+    void showPairInfo(const QString& infoJson);
+    void onFinished(const ha::SyncResult& res);   // callback из SyncService
+    void showResult(const ha::SyncResult& r);     // реакция в цикле событий
+    bool askConfirm(const QString& pubkey);
 
     ha::Store& store_;
     QLabel*      qrLabel_;
@@ -49,7 +46,6 @@ private:
 
     std::unique_ptr<ha::SyncServer> server_;
     std::unique_ptr<ha::SyncClient> client_;
-    std::thread worker_;
     bool busy_ = false;
-    std::atomic<bool> closing_{false};
+    bool closing_ = false;
 };

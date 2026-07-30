@@ -76,15 +76,12 @@ SyncDialog::SyncDialog(ha::Store& store, QWidget* parent)
 
     connect(serverBtn_, &QPushButton::clicked, this, &SyncDialog::startServer);
     connect(clientBtn_, &QPushButton::clicked, this, &SyncDialog::startClient);
-    connect(this, &SyncDialog::serverReady, this, &SyncDialog::onServerReady, Qt::QueuedConnection);
-    connect(this, &SyncDialog::finished, this, &SyncDialog::onFinished, Qt::QueuedConnection);
 }
 
 SyncDialog::~SyncDialog() {
     closing_ = true;
     if (server_) server_->cancel();
     if (client_) client_->cancel();
-    if (worker_.joinable()) worker_.join();
 }
 
 void SyncDialog::closeEvent(QCloseEvent* e) {
@@ -97,15 +94,11 @@ void SyncDialog::closeEvent(QCloseEvent* e) {
 }
 
 bool SyncDialog::askConfirm(const QString& pubkey) {
-    if (closing_) return false;          // не блокироваться при закрытии
-    bool result = false;
-    QMetaObject::invokeMethod(this, [&]() {
-        auto r = QMessageBox::question(this, tr("Новое устройство"),
-            tr("Разрешить синхронизацию с новым устройством?\n\n") + pubkey.left(48) + "…",
-            QMessageBox::Yes | QMessageBox::No);
-        result = (r == QMessageBox::Yes);
-    }, Qt::BlockingQueuedConnection);
-    return result;
+    if (closing_) return false;          // не спрашивать при закрытии
+    auto r = QMessageBox::question(this, tr("Новое устройство"),
+        tr("Разрешить синхронизацию с новым устройством?\n\n") + pubkey.left(48) + "…",
+        QMessageBox::Yes | QMessageBox::No);
+    return r == QMessageBox::Yes;
 }
 
 void SyncDialog::startServer() {
@@ -119,24 +112,18 @@ void SyncDialog::startServer() {
     ha::PairInfo info;
     try {
         info = server_->listen();
+        showPairInfo(QString::fromStdString(info.toJson()));
+        server_->start(
+            [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); },
+            [this](const ha::SyncResult& r) { onFinished(r); });
     } catch (const std::exception& e) {
         status_->setText(tr("Ошибка: ") + e.what());
         busy_ = false; serverBtn_->setEnabled(true); clientBtn_->setEnabled(true);
         return;
     }
-    emit serverReady(QString::fromStdString(info.toJson()));
-
-    worker_ = std::thread([this]() {
-        auto confirm = [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); };
-        ha::SyncResult r = server_->wait(confirm);
-        QString msg = r.ok
-            ? tr("Передано %1, принято %2").arg(r.sent).arg(r.received)
-            : tr("Не выполнено");
-        emit finished(r.ok, msg, QString::fromStdString(r.error), QString::fromStdString(r.peerDb));
-    });
 }
 
-void SyncDialog::onServerReady(QString infoJson) {
+void SyncDialog::showPairInfo(const QString& infoJson) {
     qrLabel_->setPixmap(renderQr(infoJson));
     auto info = ha::PairInfo::fromJson(infoJson.toStdString());
     infoLabel_->setText(tr("IP: %1   Порт: %2\nКод: %3\nБаза: %4")
@@ -168,31 +155,46 @@ void SyncDialog::startClient() {
     status_->setText(tr("Подключение…"));
 
     client_ = std::make_unique<ha::SyncClient>(store_);
-    worker_ = std::thread([this, info]() {
-        auto confirm = [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); };
-        ha::SyncResult r = client_->connect(info, confirm);
-        QString msg = r.ok
-            ? tr("Передано %1, принято %2").arg(r.sent).arg(r.received)
-            : tr("Не выполнено");
-        emit finished(r.ok, msg, QString::fromStdString(r.error), QString::fromStdString(r.peerDb));
-    });
+    try {
+        client_->start(info,
+            [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); },
+            [this](const ha::SyncResult& r) { onFinished(r); });
+    } catch (const std::exception& e) {
+        status_->setText(tr("Ошибка: ") + e.what());
+        busy_ = false; serverBtn_->setEnabled(true); clientBtn_->setEnabled(true);
+        return;
+    }
 }
 
-void SyncDialog::onFinished(bool ok, QString message, QString error, QString peerDb) {
-    if (worker_.joinable()) worker_.join();
+// Callback приходит из обработчика сокета: реакцию (в т.ч. модальные окна)
+// откладываем на следующий проход цикла событий.
+void SyncDialog::onFinished(const ha::SyncResult& res) {
+    if (closing_) return;
+    QMetaObject::invokeMethod(this, [this, res] { showResult(res); },
+                              Qt::QueuedConnection);
+}
+
+void SyncDialog::showResult(const ha::SyncResult& r) {
+    if (closing_) return;                 // окно уже закрывают — UI не трогаем
     busy_ = false;
     serverBtn_->setEnabled(true);
     clientBtn_->setEnabled(true);
+
+    bool ok = r.ok;
+    QString message = ok ? tr("Передано %1, принято %2").arg(r.sent).arg(r.received)
+                         : tr("Не выполнено");
+    QString error = QString::fromStdString(r.error);
+    QString peerDb = QString::fromStdString(r.peerDb);
 
     if (ok) {
         status_->setText("✓ " + message);
         QMessageBox::information(this, tr("Синхронизация"), message);
     } else if (error == "db_mismatch") {
-        auto r = QMessageBox::question(this, tr("Разные базы"),
+        auto btn = QMessageBox::question(this, tr("Разные базы"),
             tr("У партнёра база «%1», у вас «%2».\nПереключиться на «%1»?")
                 .arg(peerDb).arg(QString::fromStdString(store_.database())),
             QMessageBox::Yes | QMessageBox::No);
-        if (r == QMessageBox::Yes) {
+        if (btn == QMessageBox::Yes) {
             store_.switchDatabase(peerDb.toStdString(), true);
             status_->setText(tr("База переключена на «%1». Повторите синхронизацию.").arg(peerDb));
         }

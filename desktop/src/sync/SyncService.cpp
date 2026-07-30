@@ -1,39 +1,40 @@
+// Синхронизация на Qt: QSslSocket + главный цикл событий (app.exec).
+// Корутин и отдельных потоков нет — весь протокол выражен продолжениями
+// (callback'ами): каждый шаг заканчивается вызовом Cont, который запускает
+// следующий. Обмен по-прежнему потоковый: ни файлы, ни блоки не накапливаются
+// в памяти, а cancel() рвёт соединение в любой точке.
 #include "SyncService.h"
 #include "Crypto.h"
 #include "../model/Store.h"
 
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/use_awaitable.hpp>
-#include <boost/json.hpp>
-#include <openssl/x509.h>
-#include <openssl/pem.h>
+#include <QSslSocket>
+#include <QSslConfiguration>
+#include <QSslCertificate>
+#include <QSslError>
+#include <QSslKey>
+#include <QTcpServer>
+#include <QHostAddress>
+#include <QNetworkInterface>
+#include <QFile>
+#include <QTimer>
 
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <boost/json.hpp>
+
+#include <unistd.h>
 #include <random>
 #include <stdexcept>
-#include <atomic>
-#include <mutex>
 #include <memory>
 #include <fstream>
 #include <algorithm>
 #include <functional>
 #include <vector>
+#include <deque>
 #include <list>
 
 using namespace std::literals::string_view_literals;
 using namespace std::string_literals;
-namespace asio = boost::asio;
-namespace ssl  = boost::asio::ssl;
 namespace json = boost::json;
 namespace fs   = std::filesystem;
-using tcp = asio::ip::tcp;
-using SslStream = ssl::stream<tcp::socket>;
 
 namespace ha {
 
@@ -58,6 +59,13 @@ PairInfo PairInfo::fromJson(const std::string& s) {
 
 namespace {
 
+using Cont = std::function<void()>;
+
+// Сколько байт разрешаем держать в буфере сокета: выше — ждём bytesWritten.
+constexpr qint64 kHighWater = 256 * 1024;
+// Сколько ждать вытеснения хвоста после завершения сессии.
+constexpr int kLingerMs = 10000;
+
 std::string randomCode(int n) {
     static const char* A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     std::random_device rd;
@@ -68,318 +76,1095 @@ std::string randomCode(int n) {
 }
 
 std::string localIPv4() {
-    struct ifaddrs* ifs = nullptr;
-    std::string result = "127.0.0.1";
-    if (getifaddrs(&ifs) != 0) return result;
-    for (auto* p = ifs; p; p = p->ifa_next) {
-        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
-        if (p->ifa_flags & IFF_LOOPBACK) continue;
-        char buf[INET_ADDRSTRLEN];
-        auto* sin = reinterpret_cast<sockaddr_in*>(p->ifa_addr);
-        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
-        result = buf;
-        break;
+    for (const QHostAddress& a : QNetworkInterface::allAddresses()) {
+        if (a.isLoopback()) continue;
+        if (a.protocol() != QAbstractSocket::IPv4Protocol) continue;
+        return a.toString().toStdString();
     }
-    freeifaddrs(ifs);
-    return result;
+    return "127.0.0.1";
 }
 
-std::string peerPubkey(SslStream& s) {
-    return crypto::peerPubkey(s.native_handle());
+QString qstr(const fs::path& p) { return QString::fromStdString(p.string()); }
+
+// Наша TLS-личность: самоподписанный сертификат + ключ EC P-256.
+// Чужой сертификат не проверяем (QueryPeer) — доверие даёт код сопряжения,
+// а идентификатором устройства служит открытый ключ из сертификата.
+QSslConfiguration makeConfig(Store& store) {
+    QSslConfiguration c = QSslConfiguration::defaultConfiguration();
+    QFile cf(qstr(store.certPath()));
+    if (!cf.open(QIODevice::ReadOnly))
+        throw std::runtime_error("open cert: "s + store.certPath().string());
+    QSslCertificate cert(&cf, QSsl::Pem);
+    if (cert.isNull()) throw std::runtime_error("parse cert"s);
+    QFile kf(qstr(store.keyPath()));
+    if (!kf.open(QIODevice::ReadOnly))
+        throw std::runtime_error("open key: "s + store.keyPath().string());
+    QSslKey key(&kf, QSsl::Ec, QSsl::Pem, QSsl::PrivateKey);
+    if (key.isNull()) throw std::runtime_error("parse key"s);
+    c.setLocalCertificate(cert);
+    c.setPrivateKey(key);
+    c.setPeerVerifyMode(QSslSocket::QueryPeer);   // сертификат просим, но не поверяем
+    c.setProtocol(QSsl::TlsV1_2OrLater);
+    return c;
 }
 
-void configureContext(ssl::context& ctx, Store& store) {
-    ctx.set_verify_mode(ssl::verify_peer);
-    ctx.set_verify_callback([](bool, ssl::verify_context&) { return true; });
-    ctx.use_certificate_file(store.certPath().string(), ssl::context::pem);
-    ctx.use_private_key_file(store.keyPath().string(), ssl::context::pem);
+// Открытый ключ партнёра (base64 DER SubjectPublicKeyInfo) — идентификатор устройства.
+std::string peerPubkeyOf(QSslSocket* s) {
+    QByteArray pem = s->peerCertificate().toPem();
+    if (pem.isEmpty()) return {};
+    return crypto::publicKeyFromCertPem(std::string(pem.constData(), pem.size()));
 }
 
-// ---- асинхронные помощники (всё через co_await — прерываются закрытием сокета) ----
-asio::awaitable<std::string> aReadLine(SslStream& s, std::string& rbuf) {
-    std::size_t nl;
-    while ((nl = rbuf.find('\n')) == std::string::npos) {
-        char tmp[4096];
-        std::size_t n = co_await s.async_read_some(asio::buffer(tmp), asio::use_awaitable);
-        rbuf.append(tmp, n);
-    }
-    std::string line = rbuf.substr(0, nl);
-    rbuf.erase(0, nl + 1);
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    co_return line;
-}
+// ---- разбор диапазона месячного файла (без накопления в памяти) ----
+// Нужен, чтобы ЗАРАНЕЕ узнать: начинается ли отправляемый кусок с header'а
+// (иначе придётся предпослать действующий у партнёра) и какая схема окажется
+// действующей в конце куска.
+struct RangeScan {
+    Schema lastHeader;
+    bool   firstIsHeader = false;
+};
 
-asio::awaitable<void> aReadSizedJson(SslStream &s, std::string &rbuf,
-	std::size_t count, std::function<void(const json::value &v)> sink) {
-    json::stream_parser sp;
-    if(!rbuf.empty()) {
-	auto p = rbuf.data();
-	if(count < rbuf.size()) {
-	    auto consumed = sp.write_some(p, count);
-	    while(sp.done()) {
-		sink(sp.release());
-		sp.reset();
-		p += consumed; count -= consumed;
-		consumed = sp.write_some(p, count);
-	    }
-	    p += count;
-	    if(*p != '\n') throw std::runtime_error("bad protocol"s);
-	    rbuf.erase(0, count + 1);
-	    co_return;
-	}
-	else {
-	    auto size = rbuf.size();
-	    count -= size;
-	    auto consumed = sp.write_some(rbuf);
-	    while(sp.done()) {
-		sink(sp.release());
-		sp.reset();
-		p += consumed; size -= consumed;
-		consumed = sp.write_some(p, size);
-	    }
-	    rbuf.clear();
-	}
-    }
-    ++count; // \n после данных
-    char block[16384];
-    for(;;) {
-        std::size_t want = std::min(count, sizeof(block));
-        std::size_t got = co_await s.async_read_some(asio::buffer(block, want), asio::use_awaitable);
-        count -= got;
-	char *p = block;
-	auto consumed = sp.write_some(p, got);
-	while(sp.done()) {
-	    sink(sp.release());
-	    sp.reset();
-	    p += consumed; got -= consumed;
-	    consumed = sp.write_some(p, got);
-	}
-	if(!count) {
-	    if(block[got - 1] != '\n')
-		throw std::runtime_error("bad protocol"s);
-	    break;
-	}
-    }
-}
-
-asio::awaitable<void> aWrite(SslStream& s, std::string data) {
-    co_await asio::async_write(s, asio::buffer(data), asio::use_awaitable);
-}
-asio::awaitable<void> aWriteLine(SslStream& s, std::string line) {
-    line.push_back('\n');
-    co_await asio::async_write(s, asio::buffer(line), asio::use_awaitable);
-}
-
-asio::awaitable<void> aStreamFullFile(SslStream &s,
-				      const Store &store,
-				      std::string_view name) {
-    auto path = store.dbDir() / (std::string(name) + ".jsonl"s);
-    {   json::array h;
-	h.emplace_back(name);
-	h.emplace_back((uint64_t)fs::file_size(path));
-	co_await aWriteLine(s, json::serialize(h));
-    }
+RangeScan scanRange(const fs::path& path, uint64_t from, uint64_t to) {
+    RangeScan r;
+    if (to <= from) return r;
     std::ifstream in(path, std::ios::binary);
-    char block[16384];
-    while (in) {
-        in.read(block, sizeof(block));
-        std::streamsize got = in.gcount();
-        if (got <= 0) break;
-        co_await asio::async_write(s, asio::buffer(block, (std::size_t)got),
-				   asio::use_awaitable);
-    }
-    co_await aWrite(s, "\n");
-}
-
-asio::awaitable<MonthSyncData> aStreamFullEventFile(SslStream &s,
-	const Store &store, int yyyymm, const fs::path &path) {
-    int64_t size = fs::file_size(path);
-    {   json::array h;
-	h.emplace_back("event"sv);
-	h.emplace_back(yyyymm);
-	h.emplace_back(size);
-	co_await aWriteLine(s, json::serialize(h));
-    }
-    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("bad data"s);
+    if (from) in.seekg((std::streamoff)from);
+    uint64_t rest = to - from;
     MallocPtr<char> block(block_size());
     json::stream_parser sp;
-    Schema header;
-    while (in) {
-        in.read(block.get(), block_size());
-        std::streamsize got = in.gcount();
-        if (got <= 0) break;
-	char *p = block.get();
-	auto si = got;
-	for(;;) {
-	    auto consumed = sp.write_some(p, si);
-	    if(!sp.done()) break;
-	    auto v = sp.release();
-            if(v.is_object()) {
-                auto &o = v.as_object();
-                if(o.if_contains("header")) header = Schema(o);
-	    }
-	    sp.reset();
-	    p += consumed; si -= consumed;
-	}
-        co_await asio::async_write(s, asio::buffer(block.get(),
-						   (std::size_t)got),
-				   asio::use_awaitable);
-    }
-    co_await aWrite(s, "\n"s);
-    co_return MonthSyncData{size, std::move(header)};
-}
-
-asio::awaitable<void> aStreamTopEventFile(SslStream &s,
-	const Store &store, int yyyymm, const fs::path &path,
-	const MonthSyncData &cur) {
-    {   json::array h;
-	h.emplace_back("event"sv);
-	h.emplace_back(yyyymm);
-	h.emplace_back(cur.offset);
-	co_await aWriteLine(s, json::serialize(h));
-    }
-    std::ifstream in(path, std::ios::binary);
-    MallocPtr<char> block(block_size());
-    uint64_t rest = cur.offset;
-    while(in) {
-        in.read(block.get(), block_size());
-        std::streamsize got = in.gcount();
-        if(got <= 0) break;
-	if(got > rest) got = rest;
-        co_await asio::async_write(s, asio::buffer(block.get(),
-						   (std::size_t)got),
-				   asio::use_awaitable);
-	rest -= got;
-	if(!rest) break;
-    }
-    if(rest) throw std::runtime_error("bad data"s);
-    co_await aWrite(s, "\n"s);
-}
-
-asio::awaitable<MonthSyncData> aStreamEventFile(SslStream &s,
-	const Store &store, int yyyymm, const fs::path &path,
-	const MonthSyncData &peer) {
-    MonthSyncData cur;
-    cur.offset = fs::file_size(path);
-    if(cur.offset <= peer.offset) co_return peer;
     bool first = true;
-    std::ifstream in(path, std::ios::binary);
-    in.seekg(peer.offset);
-    MallocPtr<char> block(block_size());
-    json::stream_parser sp;
-    while (in) {
-        in.read(block.get(), block_size());
+    while (rest && in) {
+        std::size_t want = (std::size_t)std::min<uint64_t>(rest, block_size());
+        in.read(block.get(), (std::streamsize)want);
         std::streamsize got = in.gcount();
         if (got <= 0) break;
-	char *p = block.get();
-	auto si = got;
-	for(;;) {
-	    auto consumed = sp.write_some(p, si);
-	    if(!sp.done()) break;
-	    auto v = sp.release();
-            if(v.is_object()) {
-                auto &o = v.as_object();
-                if(o.if_contains("header")) {
-		    cur.header = Schema(o);
-		    if(first) {
-			first = false;
-			{   json::array h;
-			    h.emplace_back("event"sv);
-			    h.emplace_back(yyyymm);
-			    h.emplace_back(cur.offset - peer.offset);
-			    co_await aWriteLine(s, json::serialize(h));
-			}
-		    }
-		}
-	    }
-	    if(first) {
-		first = false;
-		cur.header = peer.header;
-		std::string ch = peer.header.serialize() + "\n"s;
-		{   json::array h;
-		    h.emplace_back("event"sv);
-		    h.emplace_back(yyyymm);
-		    h.emplace_back(cur.offset - peer.offset + ch.size());
-		    co_await aWriteLine(s, json::serialize(h));
-		}
-		co_await aWrite(s, ch);
-	    }
-	    sp.reset();
-	    p += consumed; si -= consumed;
-	}
-	if(first) {
-	    // сюда мы гарантированно попадаем в случае когда одно событие не помещается в буфер - маловероятно на самом деле, но обработаем
-	    first = false;
-	    cur.header = peer.header;
-	    std::string ch = peer.header.serialize() + "\n"s;
-	    {   json::array h;
-		h.emplace_back("event"sv);
-		h.emplace_back(yyyymm);
-		h.emplace_back(cur.offset - peer.offset + ch.size());
-		co_await aWriteLine(s, json::serialize(h));
-	    }
-	    co_await aWrite(s, ch);
-	}
-        co_await asio::async_write(s, asio::buffer(block.get(),
-						   (std::size_t)got),
-				   asio::use_awaitable);
+        rest -= (uint64_t)got;
+        const char* p = block.get();
+        std::size_t n = (std::size_t)got;
+        while (n) {
+            auto consumed = sp.write_some(p, n);
+            p += consumed; n -= consumed;
+            if (!sp.done()) break;
+            auto v = sp.release();
+            sp.reset();
+            if (v.is_object()) {
+                auto& o = v.as_object();
+                if (o.if_contains("header")) {
+                    r.lastHeader = Schema(o);
+                    if (first) r.firstIsHeader = true;
+                }
+            }
+            first = false;
+        }
     }
-    co_await aWrite(s, "\n"s);
-    co_return cur;
+    return r;
 }
 
-asio::awaitable<MonthSyncData> aStreamMiddleEventFile(SslStream &s,
-	const Store &store, int yyyymm, const fs::path &path,
-	const MonthSyncData &peer, const MonthSyncData &cur) {
-    bool first = true;
-    std::ifstream in(path, std::ios::binary);
-    in.seekg(peer.offset);
-    MallocPtr<char> block(block_size());
+// ============================================================
+//                          Session
+// ============================================================
+// Одна сессия синхронизации поверх одного QSslSocket. Роли (сервер/клиент)
+// отличаются только точкой входа: serverGo()/clientGo().
+struct Session : std::enable_shared_from_this<Session> {
+    explicit Session(Store& s) : store(s), wbuf(block_size()) {}
+    ~Session() { detach(true); }
+
+    Store&      store;
+    SyncResult  res;
+    ConfirmFn   confirm;
+    DoneFn      done;
+    QSslSocket* sock = nullptr;
+    std::vector<QMetaObject::Connection> conns;
+    bool cancelled = false;
+    bool completed = false;
+
+    // ---------- приём ----------
+    std::string rbuf;
+    enum Pending { PendNone, PendLine, PendBlock };
+    Pending pending = PendNone;
+    std::function<void(std::string&&)> lineCb;
+    std::size_t blockLeft = 0;
     json::stream_parser sp;
-    uint64_t rest = cur.offset - peer.offset;
-    while (in) {
-        in.read(block.get(), block_size());
-        std::streamsize got = in.gcount();
-        if (got <= 0) break;
-	if(got > rest) got = rest;
-	if(first) {
-	    sp.write_some(block.get(), got);
-	    if(sp.done()) {
-		auto v = sp.release();
-		if(v.is_object()) {
-		    auto &o = v.as_object();
-		    if(o.if_contains("header")) {
-			first = false;
-			{   json::array h;
-			    h.emplace_back("event"sv);
-			    h.emplace_back(yyyymm);
-			    h.emplace_back(rest);
-			    co_await aWriteLine(s, json::serialize(h));
-			}
-		    }
-		}
-	    }
-	    if(first) {
-		first = false;
-		std::string ch = peer.header.serialize() + "\n"s;
-		{   json::array h;
-		    h.emplace_back("event"sv);
-		    h.emplace_back(yyyymm);
-		    h.emplace_back(rest + ch.size());
-		    co_await aWriteLine(s, json::serialize(h));
-		}
-		co_await aWrite(s, ch);
-	    }
-	}
-        co_await asio::async_write(s, asio::buffer(block.get(),
-						   (std::size_t)got),
-				   asio::use_awaitable);
-	rest -= got;
-	if(!rest) break;
+    std::function<void(const json::value&)> blockSink;
+    Cont blockCb;
+    bool inPump = false;
+
+    // ---------- отправка ----------
+    // Очередь маленькая: литеральные строки протокола + ссылки на диапазоны
+    // файлов; сами файлы читаются блоками прямо в сокет.
+    struct Out { std::string data; fs::path path; uint64_t from = 0, to = 0; };
+    std::deque<Out> outq;
+    std::ifstream outFile;
+    uint64_t outPos = 0;
+    std::vector<char> wbuf;
+    Cont writeCb;
+    bool inWrite = false;
+
+    // ---------- состояние протокола ----------
+    std::string peer;          // открытый ключ партнёра
+    int  peerDeviceNo = 0;
+    bool storeEmpty = false;
+    json::value  av;           // текущая команда (живёт, пока её читают)
+    json::array* ao = nullptr;
+    std::string  cmd;
+    SyncIndex idx, idxCur, idxNew;
+
+    // -------------------------------------------------- подключение сокета
+    void attach(QSslSocket* s, Cont onReady) {
+        sock = s;
+        conns.push_back(QObject::connect(s, &QSslSocket::encrypted, s,
+            [this, onReady] {
+                if (completed) return;
+                peer = peerPubkeyOf(sock);
+                if (peer.empty()) { fail("no peer certificate"s); return; }
+                res.peerPubkey = peer;
+                call([&] { onReady(); });
+            }));
+        conns.push_back(QObject::connect(s, &QSslSocket::sslErrors, s,
+            [s](const QList<QSslError>&) { s->ignoreSslErrors(); }));
+        conns.push_back(QObject::connect(s, &QIODevice::readyRead, s,
+            [this] { onReadyRead(); }));
+        conns.push_back(QObject::connect(s, &QIODevice::bytesWritten, s,
+            [this](qint64) { pumpWrite(); }));
+        conns.push_back(QObject::connect(s, &QAbstractSocket::disconnected, s,
+            [this] {
+                onReadyRead();               // дочитать то, что успело прийти
+                fail("connection closed"s);
+            }));
+        conns.push_back(QObject::connect(s, &QAbstractSocket::errorOccurred, s,
+            [this](QAbstractSocket::SocketError) {
+                fail(sock ? sock->errorString().toStdString() : "socket error"s);
+            }));
     }
-    if(rest) throw std::runtime_error("bad data"s);
-    co_await aWrite(s, "\n"s);
-}
+
+    // Отцепить сокет. hard (отмена/деструктор) — рвать немедленно, иначе дать
+    // вытеснить хвост (последнее ["done"]) и закрыться штатно.
+    void detach(bool hard) {
+        for (auto& c : conns) QObject::disconnect(c);
+        conns.clear();
+        QSslSocket* s = sock;
+        sock = nullptr;
+        if (!s) return;
+        if (hard) { s->abort(); s->deleteLater(); return; }
+        QObject::connect(s, &QAbstractSocket::disconnected, s, &QObject::deleteLater);
+        QObject::connect(s, &QAbstractSocket::errorOccurred, s,
+                         [s](QAbstractSocket::SocketError) { s->deleteLater(); });
+        QTimer::singleShot(kLingerMs, s, [s] { s->deleteLater(); });
+        if (s->state() == QAbstractSocket::UnconnectedState) s->deleteLater();
+        else s->disconnectFromHost();
+    }
+
+    // -------------------------------------------------- завершение
+    void finish() {
+        if (completed) return;
+        completed = true;
+        auto self = shared_from_this();      // переживём удаление владельца
+        if (!res.ok && res.error.empty() && cancelled) res.error = "cancelled";
+        // Не отмена — дать хвосту (последнему ["done"] / ["error"]) уйти.
+        detach(cancelled);
+        outq.clear();
+        if (outFile.is_open()) outFile.close();
+        lineCb = nullptr; blockCb = nullptr; blockSink = nullptr; writeCb = nullptr;
+        auto cb = std::move(done);
+        done = nullptr;
+        if (cb) cb(res);
+    }
+
+    void fail(const std::string& e) {
+        if (completed) return;
+        if (res.error.empty()) res.error = cancelled ? "cancelled"s : e;
+        finish();
+    }
+
+    void cancel() {
+        if (completed) return;
+        cancelled = true;
+        fail("cancelled"s);
+    }
+
+    // Выполнить продолжение, поймав исключение разбора/ввода-вывода.
+    // false — сессия завершилась (ошибкой или успехом), продолжать нельзя.
+    template<class F> bool call(F&& f) {
+        try { f(); }
+        catch (const std::exception& e) { fail(e.what()); return false; }
+        catch (...) { fail("unknown error"s); return false; }
+        return !completed;
+    }
+
+    // -------------------------------------------------- чтение
+    void readLine(std::function<void(std::string&&)> cb) {
+        lineCb = std::move(cb);
+        pending = PendLine;
+        pump();
+    }
+
+    // Ровно count байт JSON-значений, затем разделитель '\n'.
+    void readBlock(std::size_t count,
+                   std::function<void(const json::value&)> sink, Cont cb) {
+        sp.reset();
+        blockLeft = count;
+        blockSink = std::move(sink);
+        blockCb = std::move(cb);
+        pending = PendBlock;
+        pump();
+    }
+
+    void onReadyRead() {
+        if (completed || !sock) return;
+        QByteArray ba = sock->readAll();
+        if (!ba.isEmpty()) rbuf.append(ba.constData(), (std::size_t)ba.size());
+        pump();
+    }
+
+    // Скормить парсеру то, что уже пришло. true — блок дочитан целиком.
+    bool feedBlock() {
+        while (blockLeft && !rbuf.empty()) {
+            std::size_t n = std::min<std::size_t>(blockLeft, rbuf.size());
+            const char* p = rbuf.data();
+            std::size_t left = n;
+            while (left) {
+                auto consumed = sp.write_some(p, left);
+                p += consumed; left -= consumed;
+                if (!sp.done()) break;      // весь остаток скормлен
+                auto v = sp.release();
+                sp.reset();
+                blockSink(v);
+            }
+            if (left) throw std::runtime_error("bad protocol"s);
+            rbuf.erase(0, n);
+            blockLeft -= n;
+        }
+        if (blockLeft) return false;
+        if (rbuf.empty()) return false;
+        if (rbuf[0] != '\n') throw std::runtime_error("bad protocol"s);
+        rbuf.erase(0, 1);
+        return true;
+    }
+
+    void pump() {
+        if (inPump || completed) return;
+        inPump = true;
+        for (;;) {
+            if (completed) break;
+            if (pending == PendLine) {
+                auto nl = rbuf.find('\n');
+                if (nl == std::string::npos) break;
+                std::string line = rbuf.substr(0, nl);
+                rbuf.erase(0, nl + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                pending = PendNone;
+                auto cb = std::move(lineCb);
+                lineCb = nullptr;
+                if (!call([&] { cb(std::move(line)); })) break;
+                continue;                    // продолжение могло заказать ещё чтение
+            }
+            if (pending == PendBlock) {
+                bool ready = false;
+                if (!call([&] { ready = feedBlock(); })) break;
+                if (!ready) break;           // ждём данных из сокета
+                pending = PendNone;
+                auto cb = std::move(blockCb);
+                blockCb = nullptr;
+                blockSink = nullptr;
+                if (!call([&] { cb(); })) break;
+                continue;
+            }
+            break;
+        }
+        inPump = false;
+    }
+
+    // -------------------------------------------------- запись
+    void send(std::string data) {
+        if (data.empty()) return;
+        outq.push_back(Out{std::move(data), {}, 0, 0});
+    }
+    void sendFile(const fs::path& p, uint64_t from, uint64_t to) {
+        if (to > from) outq.push_back(Out{{}, p, from, to});
+    }
+    void flush(Cont cb) {
+        writeCb = std::move(cb);
+        pumpWrite();
+    }
+
+    void pumpWrite() {
+        if (completed || !sock || inWrite) return;
+        inWrite = true;
+        while (!outq.empty()) {
+            if (sock->bytesToWrite() >= kHighWater) { inWrite = false; return; }
+            Out& o = outq.front();
+            if (o.path.empty()) {
+                sock->write(o.data.data(), (qint64)o.data.size());
+                outq.pop_front();
+                continue;
+            }
+            if (!outFile.is_open()) {
+                outFile.open(o.path, std::ios::binary);
+                if (!outFile) { inWrite = false; fail("file error"s); return; }
+                if (o.from) outFile.seekg((std::streamoff)o.from);
+                outPos = o.from;
+            }
+            std::size_t want = (std::size_t)std::min<uint64_t>(o.to - outPos,
+                                                               wbuf.size());
+            outFile.read(wbuf.data(), (std::streamsize)want);
+            std::streamsize got = outFile.gcount();
+            if (got <= 0) { inWrite = false; fail("bad data"s); return; }
+            sock->write(wbuf.data(), (qint64)got);
+            outPos += (uint64_t)got;
+            if (outPos >= o.to) { outFile.close(); outq.pop_front(); }
+        }
+        inWrite = false;
+        if (writeCb) {
+            auto cb = std::move(writeCb);
+            writeCb = nullptr;
+            call([&] { cb(); });
+        }
+    }
+
+    // -------------------------------------------------- команды протокола
+    void cmdNext(Cont cb) {
+        readLine([this, cb](std::string&& line) {
+            av = json::parse(line);
+            ao = &av.as_array();
+            cmd = std::string(ao->at(0).as_string());
+            cb();
+        });
+    }
+
+    // ---- постановка в очередь целых файлов/диапазонов ----
+    void queueFullFile(std::string_view name) {
+        auto path = store.dbDir() / (std::string(name) + ".jsonl"s);
+        uint64_t size = fs::file_size(path);
+        json::array h;
+        h.emplace_back(name);
+        h.emplace_back(size);
+        send(json::serialize(h) + "\n"s);
+        sendFile(path, 0, size);
+        send("\n"s);
+    }
+
+    static std::string eventHead(int yyyymm, uint64_t size) {
+        json::array h;
+        h.emplace_back("event"sv);
+        h.emplace_back(yyyymm);
+        h.emplace_back(size);
+        return json::serialize(h) + "\n"s;
+    }
+
+    MonthSyncData queueFullEventFile(int yyyymm, const fs::path& path) {
+        uint64_t size = fs::file_size(path);
+        auto sc = scanRange(path, 0, size);
+        send(eventHead(yyyymm, size));
+        sendFile(path, 0, size);
+        send("\n"s);
+        return MonthSyncData{(int64_t)size, sc.lastHeader};
+    }
+
+    // Отдать только начало файла — то, что партнёр ещё не видел, но что уже
+    // пришло от него самого, отдавать обратно смысла нет.
+    void queueTopEventFile(int yyyymm, const fs::path& path,
+                           const MonthSyncData& cur) {
+        if (fs::file_size(path) < (uint64_t)cur.offset)
+            throw std::runtime_error("bad data"s);
+        send(eventHead(yyyymm, (uint64_t)cur.offset));
+        sendFile(path, 0, (uint64_t)cur.offset);
+        send("\n"s);
+    }
+
+    // Хвост файла начиная с того, что у партнёра уже есть. Если хвост не
+    // начинается с header'а — предпосылаем действующую у партнёра схему.
+    MonthSyncData queueEventFile(int yyyymm, const fs::path& path,
+                                 const MonthSyncData& peerData) {
+        MonthSyncData cur;
+        cur.offset = (int64_t)fs::file_size(path);
+        if (cur.offset <= peerData.offset) return peerData;
+        auto sc = scanRange(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        uint64_t rest = (uint64_t)(cur.offset - peerData.offset);
+        if (sc.firstIsHeader) send(eventHead(yyyymm, rest));
+        else {
+            std::string ch = peerData.header.serialize() + "\n"s;
+            send(eventHead(yyyymm, rest + ch.size()));
+            send(ch);
+        }
+        sendFile(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        send("\n"s);
+        cur.header = sc.lastHeader ? sc.lastHeader : peerData.header;
+        return cur;
+    }
+
+    // Середина файла: от того, что у партнёра есть, до того, что от него же
+    // сейчас и пришло.
+    void queueMiddleEventFile(int yyyymm, const fs::path& path,
+                              const MonthSyncData& peerData,
+                              const MonthSyncData& cur) {
+        if (fs::file_size(path) < (uint64_t)cur.offset)
+            throw std::runtime_error("bad data"s);
+        auto sc = scanRange(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        uint64_t rest = (uint64_t)(cur.offset - peerData.offset);
+        if (sc.firstIsHeader) send(eventHead(yyyymm, rest));
+        else {
+            std::string ch = peerData.header.serialize() + "\n"s;
+            send(eventHead(yyyymm, rest + ch.size()));
+            send(ch);
+        }
+        sendFile(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        send("\n"s);
+    }
+
+    // ============================================================
+    //     Отдать всё партнёру, у которого ещё ничего нет
+    // ============================================================
+    void sendAllToEmptyPeer(SyncIndex* idxp, Cont next) {
+        peerDeviceNo = store.addDevice(peer);
+        queueFullFile("device"sv);
+        ++res.sent;
+        if (!store.people_.empty() || !store.people_delete.empty()) {
+            queueFullFile("people"sv);
+            ++res.sent;
+        }
+        if (!store.catalog_.empty()) {
+            queueFullFile("catalog"sv);
+            ++res.sent;
+        }
+        SyncIndex* target = idxp ? idxp : &idx;
+        store.listManifest(*target);
+        for (auto& [yyyymm, path] : store.enumerateMonths()) {
+            target->events[yyyymm] = queueFullEventFile(yyyymm, path);
+            ++res.sent;
+        }
+        send(R"(["end"])" "\n"s);
+        if (idxp) { flush(next); return; }
+        flush([this, next] {
+            cmdNext([this, next] {
+                if (cmd != "done"sv) { res.error = "bad protocol"sv; next(); return; }
+                store.saveSyncIndex(peerDeviceNo, idx);
+                res.ok = true;
+                next();
+            });
+        });
+    }
+
+    // ============================================================
+    //     Принять всё, когда у нас пусто (первое сопряжение)
+    // ============================================================
+    // Стадии: 0 device (обязательна), 1 people, 2 catalog, 3 event*, затем end.
+    int rwStage = 0;
+    Cont rwNext;
+    std::vector<Device> newDevices;
+    int newDeviceNo = 0;
+    Store::People newPeople, newPeopleDelete, *pPeople = nullptr;
+    std::unique_ptr<CatalogLoader> catLoader;
+    std::unique_ptr<MonthEvents> monthEv;
+    std::unique_ptr<std::ofstream> monthOut;
+    int monthYm = 0;
+
+    void recvAllWhenEmpty(Cont next) {
+        rwNext = std::move(next);
+        rwStage = 0;
+        idx = SyncIndex();
+        rwStep();
+    }
+
+    void rwStep() {
+        auto again = [this] { cmdNext([this] { rwStep(); }); };
+        if (rwStage == 0) {
+            rwStage = 1;
+            if (cmd != "device"sv) { res.error = "bad protocol"sv; rwNext(); return; }
+            newDevices.clear();
+            newDeviceNo = 0;
+            peerDeviceNo = 0;
+            readBlock((std::size_t)ao->at(1).as_int64(),
+                [this](const json::value& v) {
+                    newDevices.push_back(Device(v, false));
+                    if (newDevices.back().pubkey == store.myPubkey_) {
+                        if (newDeviceNo) throw std::runtime_error("bad protocol"s);
+                        newDeviceNo = newDevices.back().no;
+                        newDevices.back().name = "this"s;
+                    }
+                    else if (newDevices.back().pubkey == peer) {
+                        if (peerDeviceNo) throw std::runtime_error("bad protocol"s);
+                        peerDeviceNo = newDevices.back().no;
+                    }
+                    ++res.received;
+                },
+                [this, again] {
+                    if (!newDeviceNo || !peerDeviceNo) {
+                        res.error = "bad protocol"sv;
+                        rwNext();
+                        return;
+                    }
+                    store.devices_.swap(newDevices);
+                    store.deviceNo_ = newDeviceNo;
+                    store.saveDevices(&idx.device);
+                    store.saveConfig();
+                    again();
+                });
+            return;
+        }
+        if (rwStage == 1) {
+            rwStage = 2;
+            if (cmd == "people"sv) {
+                newPeople.clear();
+                newPeopleDelete.clear();
+                pPeople = &newPeople;
+                readBlock((std::size_t)ao->at(1).as_int64(),
+                    [this](const json::value& v) {
+                        if (v.is_object()) {
+                            for (auto& [value, time] : v.as_object())
+                                if (time.is_string())
+                                    pPeople->emplace_hint(pPeople->end(),
+                                        std::string(value),
+                                        std::string(time.as_string()));
+                        }
+                        else if (v.is_array()) {
+                            auto a = v.as_array();
+                            if (a.size() == 1 && a[0].is_string() &&
+                                a[0].as_string() == "delete"s)
+                                pPeople = &newPeopleDelete;
+                        }
+                        ++res.received;
+                    },
+                    [this, again] {
+                        store.people_.swap(newPeople);
+                        store.people_delete.swap(newPeopleDelete);
+                        store.savePeople(&idx.people);
+                        again();
+                    });
+                return;
+            }
+            idx.people = store.stateOf(store.pPeople());
+        }
+        if (rwStage == 2) {
+            rwStage = 3;
+            if (cmd == "catalog"sv) {
+                catLoader = std::make_unique<CatalogLoader>();
+                readBlock((std::size_t)ao->at(1).as_int64(),
+                    [this](const json::value& v) {
+                        catLoader->add(v);
+                        ++res.received;
+                    },
+                    [this, again] {
+                        store.catalog_.swap(catLoader->catalog_);
+                        store.catalog_delete.swap(catLoader->catalog_delete);
+                        catLoader.reset();
+                        store.saveCatalog(&idx.catalog);
+                        again();
+                    });
+                return;
+            }
+            idx.catalog = store.stateOf(store.pCatalog());
+        }
+        if (rwStage == 3 && cmd == "event"sv) {
+            monthYm = (int)ao->at(1).as_int64();
+            auto p = store.monthPath(monthYm);
+            if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            monthEv = std::make_unique<MonthEvents>(store);
+            monthOut = std::make_unique<std::ofstream>(p, std::ios::binary);
+            if (!*monthOut) { res.error = "file error"sv; rwNext(); return; }
+            readBlock((std::size_t)ao->at(2).as_int64(),
+                [this](const json::value& v) {
+                    *monthOut << json::serialize(v) << std::endl;
+                    monthEv->add(v);
+                    ++res.received;
+                },
+                [this, again] {
+                    monthOut.reset();
+                    monthEv->commit(monthYm);
+                    idx.events[monthYm] = {
+                        (int64_t)fs::file_size(store.monthPath(monthYm)),
+                        monthEv->header };
+                    monthEv.reset();
+                    again();
+                });
+            return;
+        }
+        if (cmd != "end"sv) { res.error = "bad protocol"sv; rwNext(); return; }
+        send(R"(["done"])" "\n"s);
+        flush([this] {
+            store.saveSyncIndex(peerDeviceNo, idx);
+            res.ok = true;
+            rwNext();
+        });
+    }
+
+    // ============================================================
+    //     Отдать приращение
+    // ============================================================
+    void sendAllIncrement(SyncIndex* idxPeer, SyncIndex* pCur, SyncIndex* pNew,
+                          Cont next) {
+        // В pNew записать всё, что не попало в pCur.
+        // Туда не попадут те файлы, для которых у собеседника нет изменений.
+        FileState tmp, *cur;
+        if (pCur) cur = &pCur->device; else {
+            tmp = store.stateOf(store.pDevice());
+            cur = &tmp;
+        }
+        if (idxPeer->device != *cur) {
+            queueFullFile("device"sv);
+            ++res.sent;
+            if (!pCur) idxPeer->device = *cur;
+        }
+        if (pCur) cur = &pCur->people; else {
+            tmp = store.stateOf(store.pPeople());
+            cur = &tmp;
+        }
+        if (idxPeer->people != *cur) {
+            queueFullFile("people"sv);
+            ++res.sent;
+            if (!pCur) idxPeer->people = *cur;
+        }
+        if (pCur) cur = &pCur->catalog; else {
+            tmp = store.stateOf(store.pCatalog());
+            cur = &tmp;
+        }
+        if (idxPeer->catalog != *cur) {
+            queueFullFile("catalog"sv);
+            ++res.sent;
+            if (!pCur) idxPeer->catalog = *cur;
+        }
+        for (auto& [yyyymm, path] : store.enumerateMonths()) {
+            auto pd = idxPeer->events.lower_bound(yyyymm);
+            if (pd == idxPeer->events.end() || pd->first != yyyymm) {
+                // раньше ничего не передавали
+                if (pCur) {
+                    auto c = pCur->events.find(yyyymm);
+                    if (c == pCur->events.end())
+                        // сейчас ничего не пришло
+                        pNew->events[yyyymm] = queueFullEventFile(yyyymm, path);
+                    else if (c->second.offset)
+                        // сейчас пришло то, что не имеет смысла отдавать обратно
+                        queueTopEventFile(yyyymm, path, c->second);
+                }
+                else idxPeer->events.emplace_hint(pd, yyyymm,
+                        queueFullEventFile(yyyymm, path));
+            }
+            else if (pCur) {
+                auto c = pCur->events.find(yyyymm);
+                if (c == pCur->events.end())
+                    pNew->events[yyyymm] =
+                        queueEventFile(yyyymm, path, pd->second);
+                else if (c->second.offset > pd->second.offset)
+                    queueMiddleEventFile(yyyymm, path, pd->second, c->second);
+            }
+            else pd->second = queueEventFile(yyyymm, path, pd->second);
+            ++res.sent;
+        }
+        send(R"(["end"])" "\n"s);
+        flush(next);
+    }
+
+    // ============================================================
+    //     Принять приращение
+    // ============================================================
+    int riStage = 0;
+    SyncIndex* riCur = nullptr;
+    SyncIndex* riNew = nullptr;
+    std::function<void(bool)> riNext;
+    std::unique_ptr<std::ofstream> devOut;
+    std::list<Device> reno;
+    bool peopleDelete = false;
+    std::unique_ptr<CatalogIncrementLoader> catInc;
+    MonthDeletions mdels;
+    Schema monthHeader;
+    const std::map<int, int>* dnMap = nullptr;
+
+    void recvAllIncrement(SyncIndex* cur, SyncIndex* nw,
+                          std::function<void(bool)> next) {
+        riCur = cur; riNew = nw; riNext = std::move(next);
+        riStage = 0;
+        riStep();
+    }
+
+    void riStep() {
+        auto again = [this] { cmdNext([this] { riStep(); }); };
+        if (riStage == 0) {
+            riStage = 1;
+            if (cmd == "device"sv) {
+                devOut.reset();
+                reno.clear();
+                readBlock((std::size_t)ao->at(1).as_int64(),
+                    [this](const json::value& v) {
+                        Device n(v, false);
+                        bool busyno = false;
+                        for (auto& d : store.devices_)
+                            if (d.pubkey == n.pubkey) {
+                                riNew->dnMap[n.no] = d.no;
+                                return;
+                            }
+                            else if (d.no == n.no) busyno = true;
+                        if (busyno) reno.push_back(std::move(n));
+                        else {
+                            store.addDevice(devOut, n.no, n.pubkey);
+                            riNew->dnMap[n.no] = n.no;
+                        }
+                    },
+                    [this, again] {
+                        if (!reno.empty()) {
+                            auto m = store.maxDeviceNo();
+                            for (auto& n : reno) {
+                                if (m == std::numeric_limits<int>::max())
+                                    throw std::runtime_error("too big device no"s);
+                                store.addDevice(devOut, ++m, n.pubkey);
+                                riNew->dnMap[n.no] = m;
+                            }
+                            reno.clear();
+                        }
+                        devOut.reset();          // == store.saveDevices();
+                        if (!peerDeviceNo) peerDeviceNo = store.knowsDevice(peer);
+                        if (!peerDeviceNo) {
+                            res.error = "bad protocol"sv;
+                            riNext(false);
+                            return;
+                        }
+                        riNew->device = store.stateOf(store.pDevice());
+                        again();
+                    });
+                return;
+            }
+            if (!peerDeviceNo) { res.error = "bad protocol"sv; riNext(false); return; }
+            if (riCur) {
+                riNew->device = riCur->device;
+                riNew->dnMap = riCur->dnMap;
+            }
+            else riNew->device = store.stateOf(store.pDevice());
+        }
+        if (riStage == 1) {
+            riStage = 2;
+            if (cmd == "people"sv) {
+                peopleDelete = false;
+                readBlock((std::size_t)ao->at(1).as_int64(),
+                    [this](const json::value& v) {
+                        if (v.is_object()) {
+                            for (auto& [value, time] : v.as_object())
+                                if (time.is_string()) {
+                                    ++res.received;
+                                    std::string nm(value), t(time.as_string());
+                                    if (peopleDelete) {
+                                        auto a = store.people_.find(nm);
+                                        if (a == store.people_.end()) ;
+                                        else if (a->second >= t) return;
+                                        else store.people_.erase(a);
+                                        auto& d = store.people_delete[nm];
+                                        if (d < t) d = t;
+                                    }
+                                    else {
+                                        auto d = store.people_delete.find(nm);
+                                        if (d == store.people_delete.end()) ;
+                                        else if (d->second > t) return;
+                                        else store.people_delete.erase(d);
+                                        auto& a = store.people_[nm];
+                                        if (a < t) a = t;
+                                    }
+                                }
+                        }
+                        else if (v.is_array()) {
+                            auto a = v.as_array();
+                            if (a.size() == 1 && a[0].is_string() &&
+                                a[0].as_string() == "delete"s)
+                                peopleDelete = true;
+                        }
+                    },
+                    [this, again] {
+                        store.savePeople();
+                        riNew->people = store.stateOf(store.pPeople());
+                        again();
+                    });
+                return;
+            }
+            riNew->people = riCur ? riCur->people : store.stateOf(store.pPeople());
+        }
+        if (riStage == 2) {
+            riStage = 3;
+            if (cmd == "catalog"sv) {
+                catInc = std::make_unique<CatalogIncrementLoader>(store);
+                readBlock((std::size_t)ao->at(1).as_int64(),
+                    [this](const json::value& v) {
+                        catInc->add(v);
+                        ++res.received;
+                    },
+                    [this, again] {
+                        catInc.reset();
+                        store.saveCatalog();
+                        riNew->catalog = store.stateOf(store.pCatalog());
+                        again();
+                    });
+                return;
+            }
+            riNew->catalog = riCur ? riCur->catalog : store.stateOf(store.pCatalog());
+        }
+        if (riStage == 3 && cmd == "event"sv) {
+            dnMap = riNew->dnMap.empty() ? nullptr : &riNew->dnMap;
+            monthYm = (int)ao->at(1).as_int64();
+            auto path = store.monthPath(monthYm);
+            if (path.has_parent_path()) fs::create_directories(path.parent_path());
+            monthOut = std::make_unique<std::ofstream>(
+                    path, std::ios::binary | std::ios::app);
+            if (!*monthOut) { res.error = "file error"sv; riNext(false); return; }
+            mdels.ops.clear();
+            monthHeader = Schema();
+            if (auto pos = monthOut->tellp()) {
+                if (riCur)
+                    // Заголовок в riCur не используется
+                    riCur->events[monthYm].offset = pos;
+                mdels.read(path);
+            }
+            readBlock((std::size_t)ao->at(2).as_int64(),
+                [this](const json::value& v) { riEvent(v); },
+                [this, again] {
+                    if (monthHeader) store.checkCanonical(monthYm, monthHeader);
+                    riNew->events[monthYm].offset = monthOut->tellp();
+                    monthOut.reset();
+                    again();
+                });
+            return;
+        }
+        // riCur -> riNew для отсутствующих на приёме не нужно:
+        // для клиента riNew заполнит sendAllIncrement,
+        // для сервера riCur==null, а riNew уже заполнен одним из send*
+        if (cmd != "end"sv) { res.error = "bad protocol"sv; riNext(false); return; }
+        riNext(true);
+    }
+
+    // Одна принятая строка месячного файла.
+    void riEvent(const json::value& v) {
+        ++res.received;
+        std::ofstream& out = *monthOut;
+        if (v.is_object()) {
+            auto& o = v.as_object();
+            if (o.if_contains("header")) {
+                out << json::serialize(v) << std::endl;
+                monthHeader = Schema(o);
+            }
+            else if (!monthHeader) return;
+            else if (auto* del = o.if_contains("delete")) {
+                auto* ths = o.if_contains("this");
+                if (!ths) return;
+                RecRefDel d = Store::parseRefDel(del->as_array(),
+                                                 monthHeader.reference, dnMap);
+                if (d.dev_no == -1) return;
+                RecRef t = Store::parseRef(ths->as_array(),
+                                           monthHeader.reference, dnMap);
+                if (t.dev_no == -1 || t.dev_no == store.deviceNo()) return;
+                RecRefDel u;
+                if (auto* upd = o.if_contains("update")) {
+                    u = Store::parseRefDel(upd->as_array(),
+                                           monthHeader.reference, dnMap);
+                    if (u.dev_no == -1) return;
+                }
+                MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
+                if (!mdels.ops.contains(op)) {
+                    out << json::serialize(withOurDevNoDel(v, monthHeader, dnMap))
+                        << std::endl;
+                    // Искать по op.del: d уже перемещён в op и обнулён.
+                    auto p = store.events_.find(&op.del);
+                    if (p != store.events_.end()) store.events_.erase(p);
+                }
+            }
+            return;
+        }
+        if (!monthHeader) return;
+        if (!v.is_array()) return;
+        Event* ep;
+        std::shared_ptr<Event> eh(ep = Store::parseEventArray(
+                v.as_array(), monthHeader, dnMap));
+        if (ep->dev_no == -1 || ep->dev_no == store.deviceNo() ||
+            mdels.ops.contains(*ep)) return;
+        if (store.events_.empty()) store.events_.insert(eh);
+        else {
+            auto p = store.events_.lower_bound(eh);
+            if (p != store.events_.end() && p->get()->eq_edit(*ep)) return;
+            /* TODO +++ до решения вопросов с размещением delete адекватней будет исключить весь блок
+            for(auto a = p, b = store.events_.begin(); a != b;) {
+                --a;
+                if(a->get()->event_datetime != ep->event_datetime) break;
+                if(a->get()->eq_data(*ep)) return; // TODO +++ 1. удалить у собеседника, иначе он удалит наше событие. А если событие добавлено уже после синхронизации, то его удалять не стоит - весь вопрос в том, как это определить. 2. (Под вопросом) Всё таки записать в файл оба - событие и удаление?
+            }
+            for(auto a = p, e = store.events_.end();
+                a != e && a->get()->event_datetime == ep->event_datetime;
+                ++a) if(a->get()->eq_data(*ep)) return;
+            */
+            store.events_.insert(p, eh);
+        }
+        out << json::serialize(withOurDevNo(v, monthHeader, dnMap)) << std::endl;
+    }
+
+    // Присланная строка записывается «как получили»: состав и порядок полей —
+    // в том числе неизвестных нам колонок — остаются прежними, меняется ТОЛЬКО
+    // значение dev_no, потому что оно приходит в пространстве DN собеседника.
+    static void mapDevNo(json::array& a, const std::vector<std::string>& fields,
+                         const std::map<int, int>* dn) {
+        for (std::size_t i = 0; i < fields.size() && i < a.size(); ++i)
+            if (fields[i] == "dev_no"sv) {
+                // Строки с DN вне карты сюда не доходят (отсеяны по dev_no == -1).
+                a[i] = dn->at(jsonAsDevNo(a[i]));
+                return;
+            }
+    }
+    static json::value withOurDevNo(const json::value& v, const Schema& header,
+                                    const std::map<int, int>* dn) {
+        if (!dn) return v;
+        json::value out = v;
+        mapDevNo(out.as_array(), header.columns, dn);
+        return out;
+    }
+    static json::value withOurDevNoDel(const json::value& v, const Schema& header,
+                                       const std::map<int, int>* dn) {
+        if (!dn) return v;
+        json::value out = v;
+        auto& o = out.as_object();
+        for (auto name : {"delete"sv, "this"sv, "update"sv})
+            if (auto* r = o.if_contains(name))
+                if (r->is_array())
+                    mapDevNo(r->as_array(), header.reference, dn);
+        return out;
+    }
+
+    // ============================================================
+    //     Протокол: сервер
+    // ============================================================
+    std::string code;               // ожидаемый код сопряжения
+
+    void serverGo() {
+        readLine([this](std::string&& line) {
+            auto hv = json::parse(line);
+            auto& h = hv.as_array();
+            std::string clientCode(h.at(0).as_string());
+            std::string clientDb(h.at(1).as_string());
+            bool clientEmpty = h.size() > 2 && h[2].as_string() == "empty"sv;
+            res.peerDb = clientDb;
+
+            if (clientCode != code) {
+                res.error = "bad_code";
+                send(R"(["error","bad_code"])" "\n"s);
+                flush([this] { finish(); });
+                return;
+            }
+            if (clientDb != store.database()) {
+                res.error = "db_mismatch";
+                json::array e;
+                e.emplace_back("error"sv);
+                e.emplace_back("db_mismatch"sv);
+                e.emplace_back(store.database());
+                send(json::serialize(e) + "\n"s);
+                flush([this] { finish(); });
+                return;
+            }
+
+            if (!store.hasData()) {
+                if (clientEmpty) {
+                    peerDeviceNo = store.addDevice(peer);
+                    queueFullFile("device"sv);
+                    send(R"(["end"])" "\n"s);
+                    flush([this] {
+                        cmdNext([this] {
+                            if (cmd != "done"sv) { fail("bad protocol"s); return; }
+                            idx = SyncIndex();
+                            idx.device = Store::stateOf(store.pDevice());
+                            store.saveSyncIndex(peerDeviceNo, idx);
+                            res.ok = true; res.received = 0; res.sent = 0;
+                            finish();
+                        });
+                    });
+                }
+                else {
+                    send(R"(["empty"])" "\n"s);
+                    flush([this] {
+                        cmdNext([this] {
+                            recvAllWhenEmpty([this] { finish(); });
+                        });
+                    });
+                }
+                return;
+            }
+            if (clientEmpty) {
+                sendAllToEmptyPeer(nullptr, [this] { finish(); });
+                return;
+            }
+            peerDeviceNo = store.knowsDevice(peer);
+            if (peerDeviceNo) store.loadSyncIndex(peerDeviceNo, idx);
+            Cont after = [this] {
+                cmdNext([this] {
+                    recvAllIncrement(nullptr, &idx, [this](bool ok) {
+                        if (!ok) { finish(); return; }
+                        send(R"(["done"])" "\n"s);
+                        flush([this] {
+                            store.saveSyncIndex(peerDeviceNo, idx);
+                            res.ok = true;
+                            finish();
+                        });
+                    });
+                });
+            };
+            if (idx.empty) sendAllToEmptyPeer(&idx, after);
+            else sendAllIncrement(&idx, nullptr, nullptr, after);
+        });
+    }
+
+    // ============================================================
+    //     Протокол: клиент
+    // ============================================================
+    PairInfo info;
+
+    void clientGo() {
+        storeEmpty = !store.hasData();
+        json::array hello;
+        hello.emplace_back(info.code);
+        hello.emplace_back(store.database());
+        if (storeEmpty) hello.emplace_back("empty"sv);
+        send(json::serialize(hello) + "\n"s);
+        flush([this] {
+            cmdNext([this] {
+                if (cmd == "error"sv) {
+                    res.error = std::string(ao->at(1).as_string());
+                    if (ao->size() > 2)
+                        res.peerDb = std::string(ao->at(2).as_string());
+                    finish();
+                    return;
+                }
+                if (storeEmpty) {
+                    recvAllWhenEmpty([this] { finish(); });
+                    return;
+                }
+                if (cmd == "empty"sv) {
+                    sendAllToEmptyPeer(nullptr, [this] { finish(); });
+                    return;
+                }
+                peerDeviceNo = store.knowsDevice(peer);
+                if (peerDeviceNo) {
+                    store.loadSyncIndex(peerDeviceNo, idx);
+                    idxNew.dnMap = idx.dnMap;
+                }
+                store.listManifest(idxCur);   // events заполнит приём
+                recvAllIncrement(&idxCur, &idxNew, [this](bool ok) {
+                    if (!ok) { finish(); return; }
+                    sendAllIncrement(&idx, &idxCur, &idxNew, [this] {
+                        cmdNext([this] {
+                            if (cmd != "done"sv) {
+                                res.error = "bad protocol"sv;
+                                finish();
+                                return;
+                            }
+                            store.saveSyncIndex(peerDeviceNo, idxNew);
+                            res.ok = true;
+                            finish();
+                        });
+                    });
+                });
+            });
+        });
+    }
+};
+
+// Слушающий сокет: QSslSocket поднимаем сами из дескриптора, чтобы полностью
+// управлять рукопожатием (и не зависеть от версии QSslServer).
+struct Listener : QTcpServer {
+    std::function<void(qintptr)> onConn;
+    void incomingConnection(qintptr d) override {
+        if (onConn) onConn(d);
+        else ::close((int)d);
+    }
+};
 
 } // namespace
 
@@ -387,703 +1172,125 @@ asio::awaitable<MonthSyncData> aStreamMiddleEventFile(SslStream &s,
 //                          SyncServer
 // ============================================================
 struct SyncServer::Impl {
+    explicit Impl(Store& s) : store(s) {}
     Store& store;
-    asio::io_context io;
-    ssl::context ctx;
-    tcp::acceptor acceptor;
-    std::shared_ptr<SslStream> stream;
-    std::mutex mtx;
+    Listener listener;
+    std::shared_ptr<Session> session;
     std::string code;
-    int port = 0;
-    std::atomic<bool> cancelled{false};
-    Impl(Store& s) : store(s), ctx(ssl::context::tls_server), acceptor(io) {}
+    ConfirmFn confirm;
+    DoneFn done;
+    bool cancelled = false;
+    bool reported = false;
+
+    // Результат отдаём ровно один раз — в том числе если отменили ещё до того,
+    // как кто-то подключился (сессии тогда просто нет).
+    void report(const SyncResult& r) {
+        if (reported) return;
+        reported = true;
+        auto cb = std::move(done);
+        done = nullptr;
+        if (cb) cb(r);
+    }
 };
 
 SyncServer::SyncServer(Store& store) : d_(std::make_unique<Impl>(store)) {}
-SyncServer::~SyncServer() = default;
+SyncServer::~SyncServer() { cancel(); }
 
 PairInfo SyncServer::listen() {
-    configureContext(d_->ctx, d_->store);
-    tcp::endpoint ep(tcp::v4(), 0);
-    d_->acceptor.open(ep.protocol());
-    d_->acceptor.set_option(tcp::acceptor::reuse_address(true));
-    d_->acceptor.bind(ep);
-    d_->acceptor.listen();
-    d_->port = d_->acceptor.local_endpoint().port();
+    if (!d_->listener.listen(QHostAddress::AnyIPv4, 0))
+        throw std::runtime_error("listen: " +
+                                 d_->listener.errorString().toStdString());
+    d_->listener.pauseAccepting();          // до start() соединения не разбираем
     d_->code = randomCode(8);
     PairInfo info;
     info.ip = localIPv4();
-    info.port = d_->port;
+    info.port = d_->listener.serverPort();
     info.code = d_->code;
     info.db = d_->store.database();
     return info;
 }
 
+void SyncServer::start(ConfirmFn confirm, DoneFn done) {
+    d_->confirm = std::move(confirm);
+    d_->done = std::move(done);
+    Impl* d = d_.get();
+    d->listener.onConn = [d](qintptr fd) {
+        if (d->session) { ::close((int)fd); return; }
+        auto sess = std::make_shared<Session>(d->store);
+        d->session = sess;
+        sess->confirm = d->confirm;
+        sess->code = d->code;
+        sess->done = [d](const SyncResult& r) { d->report(r); };
+        auto* s = new QSslSocket();
+        try {
+            s->setSslConfiguration(makeConfig(d->store));
+        } catch (const std::exception& e) {
+            delete s;
+            sess->res.error = e.what();
+            sess->finish();
+            return;
+        }
+        if (!s->setSocketDescriptor(fd)) {
+            delete s;
+            sess->res.error = "bad socket";
+            sess->finish();
+            return;
+        }
+        d->listener.close();                 // ждём ровно одно подключение
+        Session* p = sess.get();
+        sess->attach(s, [p] { p->serverGo(); });
+        s->startServerEncryption();
+    };
+    d_->listener.resumeAccepting();
+}
+
 void SyncServer::cancel() {
     d_->cancelled = true;
-    // Закрыть acceptor и активный сокет в io-потоке — это прерывает ЛЮБУЮ
-    // ожидающую async-операцию (accept/handshake/read/write).
-    asio::post(d_->io, [this] {
-        boost::system::error_code ec;
-        d_->acceptor.close(ec);
-        std::lock_guard<std::mutex> lk(d_->mtx);
-        if (d_->stream) d_->stream->lowest_layer().close(ec);
-    });
-}
-
-namespace {
-
-#define DCMD(s) \
-    auto av = json::parse(co_await aReadLine(s, rbuf)); \
-    json::array *ao = &av.as_array(); \
-    std::string cmd(ao->at(0).as_string())
-#define CMD(s) \
-    av = json::parse(co_await aReadLine(s, rbuf)); \
-    ao = &av.as_array(); \
-    cmd = ao->at(0).as_string()
-
-asio::awaitable<void> aSendAllToEmptyPeer(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res,
-	SyncIndex *idxp = nullptr) {
-    auto peerDeviceNo = store.addDevice(peer);
-    co_await aStreamFullFile(s, store, "device"sv);
-    ++res.sent;
-    if(!store.people_.empty() || !store.people_delete.empty()) {
-	co_await aStreamFullFile(s, store, "people"sv);
-	++res.sent;
-    }
-    if(!store.catalog_.empty()) {
-	co_await aStreamFullFile(s, store, "catalog"sv);
-	++res.sent;
-    }
-    if(!idxp) {
-	SyncIndex idx;
-	store.listManifest(idx);
-	for(auto &[yyyymm, path] : store.enumerateMonths()) {
-	    idx.events[yyyymm] =
-		co_await aStreamFullEventFile(s, store, yyyymm, path);
-	    ++res.sent;
-	}
-	co_await aWrite(s, R"(["end"])" "\n"s);
-	std::string rbuf; DCMD(s);
-	if(cmd != "done"sv) {
-	    res.error = "bad protocol"sv;
-	    co_return;
-	}
-	store.saveSyncIndex(peerDeviceNo, idx);
-	res.ok = true;
-    }
+    d_->listener.close();
+    if (d_->session) d_->session->cancel();   // сессия сама вызовет report()
     else {
-	store.listManifest(*idxp);
-	for(auto &[yyyymm, path] : store.enumerateMonths()) {
-	    idxp->events[yyyymm] =
-		co_await aStreamFullEventFile(s, store, yyyymm, path);
-	    ++res.sent;
-	}
-	co_await aWrite(s, R"(["end"])" "\n"s);
+        SyncResult r;
+        r.error = "cancelled";
+        d_->report(r);
     }
-}
-
-asio::awaitable<void> aRecvAllWhenEmpty(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res,
-	std::string &rbuf, json::array *ao, std::string cmd) {
-    if(cmd != "device"sv) {
-	res.error = "bad protocol"sv;
-	co_return;
-    }
-    decltype(store.devices_) newDevices;
-    int newDeviceNo = 0;
-    int peerDeviceNo = 0;
-    co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-	[&newDevices, &newDeviceNo, &peer, &peerDeviceNo, &store, &res
-	 ](const json::value &v) -> void {
-	    newDevices.push_back(Device(v, false));
-	    if(newDevices.back().pubkey == store.myPubkey_) {
-		if(newDeviceNo)
-		    throw std::runtime_error("bad protocol"s);
-		newDeviceNo = newDevices.back().no;
-		newDevices.back().name = "this"s;
-	    }
-	    else if(newDevices.back().pubkey == peer) {
-		if(peerDeviceNo)
-		    throw std::runtime_error("bad protocol"s);
-		peerDeviceNo = newDevices.back().no;
-	    }
-	    ++res.received;
-	});
-    if(!newDeviceNo || !peerDeviceNo) {
-	res.error = "bad protocol"sv;
-	co_return;
-    }
-    store.devices_.swap(newDevices);
-    store.deviceNo_ = newDeviceNo;
-    SyncIndex idx;
-    store.saveDevices(&idx.device);
-    store.saveConfig();
-    auto av = json::parse(co_await aReadLine(s, rbuf));
-    ao = &av.as_array();
-    cmd = ao->at(0).as_string();
-    if(cmd == "people"sv) {
-	decltype(store.people_) newPeople, newPeopleDelete;
-	auto *p = &newPeople;
-	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-		[&p,&newPeopleDelete,&res](const json::value &v) -> void {
-        if(v.is_object()) {
-	    for(auto &[value,time] : v.as_object())
-		if(time.is_string())
-		    p->emplace_hint(p->end(), std::string(value),
-				    std::string(time.as_string()));
-	}
-	else if(v.is_array()) {
-	    auto a = v.as_array();
-	    if(a.size() == 1 && a[0].is_string() &&
-	       a[0].as_string() == "delete"s)
-		p = &newPeopleDelete;
-	}
-		    ++res.received;
-		});
-	store.people_.swap(newPeople);
-	store.people_delete.swap(newPeopleDelete);
-	store.savePeople(&idx.people);
-	av = json::parse(co_await aReadLine(s, rbuf));
-	ao = &av.as_array();
-	cmd = ao->at(0).as_string();
-    }
-    else idx.people = store.stateOf(store.pPeople());
-    if(cmd == "catalog"sv) {
-	CatalogLoader loader;
-	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-		[&loader,&res](const json::value &v) -> void {
-		    loader.add(v);
-		    ++res.received;
-		});
-	store.catalog_.swap(loader.catalog_);
-	store.catalog_delete.swap(loader.catalog_delete);
-	store.saveCatalog(&idx.catalog);
-	av = json::parse(co_await aReadLine(s, rbuf));
-	ao = &av.as_array();
-	cmd = ao->at(0).as_string();
-    }
-    else idx.catalog = store.stateOf(store.pCatalog());
-    while(cmd == "event"sv) {
-	int yyyymm = ao->at(1).as_int64();
-	auto p = store.monthPath(yyyymm);
-	if(p.has_parent_path()) fs::create_directories(p.parent_path());
-	MonthEvents m(store);
-	{   std::ofstream out(p, std::ios::binary);
-	    co_await aReadSizedJson(s, rbuf,
-				    ao->at(2).as_int64(),
-		[&m,&out,&res](const json::value &v) -> void {
-		    out << json::serialize(v) << std::endl;
-		    m.add(v);
-		    ++res.received;
-		});
-	}
-	m.commit(yyyymm);
-	idx.events[yyyymm] = { (int64_t)fs::file_size(p), m.header };
-	av = json::parse(co_await aReadLine(s, rbuf));
-	ao = &av.as_array();
-	cmd = ao->at(0).as_string();
-    }
-    if(cmd == "end"sv) {
-	co_await aWrite(s, R"(["done"])" "\n"s);
-	store.saveSyncIndex(peerDeviceNo, idx);
-	res.ok = true;
-    }
-    else res.error = "bad protocol"sv;
-}
-
-asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res,
-	SyncIndex *idxPeer, SyncIndex *idxCur, SyncIndex *idxNew) {
-    // В idxNew записать всё, что не попало в idxCur
-    // А туда не попадут те файлы, для которых у собеседника нет изменений
-    FileState tmp, *cur;
-    if(idxCur) cur = &idxCur->device; else {
-	tmp = store.stateOf(store.pDevice());
-	cur = &tmp;
-    }
-    if(idxPeer->device != *cur) {
-	co_await aStreamFullFile(s, store, "device"sv);
-	++res.sent;
-	if(!idxCur) idxPeer->device = *cur;
-    }
-    if(idxCur) cur = &idxCur->people; else {
-	tmp = store.stateOf(store.pPeople());
-	cur = &tmp;
-    }
-    if(idxPeer->people != *cur) {
-	co_await aStreamFullFile(s, store, "people"sv);
-	++res.sent;
-	if(!idxCur) idxPeer->people = *cur;
-    }
-    if(idxCur) cur = &idxCur->catalog; else {
-	tmp = store.stateOf(store.pCatalog());
-	cur = &tmp;
-    }
-    if(idxPeer->catalog != *cur) {
-	co_await aStreamFullFile(s, store, "catalog"sv);
-	++res.sent;
-	if(!idxCur) idxPeer->catalog = *cur;
-    }
-    for(auto &[yyyymm, path] : store.enumerateMonths()) {
-	auto peer = idxPeer->events.lower_bound(yyyymm);
-	if(peer == idxPeer->events.end() || peer->first != yyyymm) {
-	    // раньше ничего не передавали
-	    if(idxCur) {
-		auto cur = idxCur->events.find(yyyymm);
-		if(cur == idxCur->events.end())
-		    // сейчас ничего не пришло
-		    idxNew->events[yyyymm] = co_await aStreamFullEventFile(s,
-			store, yyyymm, path);
-		else if(cur->second.offset)
-    // сейчас было что-то получено, что не имеет смысла передавать обратно
-		    co_await aStreamTopEventFile(s,
-			store, yyyymm, path, cur->second);
-		// если нашли в idxCur, то в idxNew он тоже есть, а кроме того aStreamFullEventFile ограничиваем по размеру, значит он вернёт непоследний заголовок
-	    }
-	    else idxPeer->events.emplace_hint(peer, yyyymm,
-		co_await aStreamFullEventFile(s, store, yyyymm, path));
-	}
-	else if(idxCur) {
-	    auto cur = idxCur->events.find(yyyymm);
-	    if(cur == idxCur->events.end())
-		idxNew->events[yyyymm] = co_await aStreamEventFile(s,
-			store, yyyymm, path, peer->second);
-	    else if(cur->second.offset > peer->second.offset)
-		co_await aStreamMiddleEventFile(s,
-			store, yyyymm, path, peer->second, cur->second);
-	}
-	else peer->second =
-	    co_await aStreamEventFile(s, store, yyyymm, path, peer->second);
-	++res.sent;
-    }
-    co_await aWrite(s, R"(["end"])" "\n"s);
-}
-
-// Присланная строка записывается «как получили»: состав и порядок полей — в том
-// числе неизвестных нам колонок — остаются прежними, меняется ТОЛЬКО значение
-// dev_no, потому что оно приходит в пространстве DN собеседника.
-// fields — columns (для события) или reference (для delete/this/update).
-void mapDevNo(json::array &a, const std::vector<std::string> &fields,
-	      const std::map<int, int> *dnMap) {
-    for(std::size_t i = 0; i < fields.size() && i < a.size(); ++i)
-	if(fields[i] == "dev_no"sv) {
-	// Строки с DN вне карты сюда не доходят (отсеяны по dev_no == -1).
-	    a[i] = dnMap->at(jsonAsDevNo(a[i]));
-	    return;
-	}
-}
-
-// Копия события с нашим dev_no.
-json::value withOurDevNo(const json::value &v, const Schema &header,
-			 const std::map<int, int> *dnMap) {
-    if(!dnMap) return v;
-    json::value out = v;
-    mapDevNo(out.as_array(), header.columns, dnMap);
-    return out;
-}
-
-// Копия строки удаления с нашим dev_no во всех ссылках.
-json::value withOurDevNoDel(const json::value &v, const Schema &header,
-			    const std::map<int, int> *dnMap) {
-    if(!dnMap) return v;
-    json::value out = v;
-    auto &o = out.as_object();
-    for(auto name : {"delete"sv, "this"sv, "update"sv})
-	if(auto *r = o.if_contains(name))
-	    if(r->is_array())
-		mapDevNo(r->as_array(), header.reference, dnMap);
-    return out;
-}
-
-asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
-	const std::string &peer, SyncResult &res,
-	std::string &rbuf, json::array *ao, std::string cmd,
-	int &peerDeviceNo, SyncIndex *idxCur, SyncIndex *idxNew) {
-    json::value av;
-    if(cmd == "device"sv) {
-	std::unique_ptr<std::ofstream> outp;
-	std::list<Device> reno;
-	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-		[&](const json::value &v) -> void {
-		    Device n(v, false);
-		    bool busyno = false;
-		    for(auto &d : store.devices_)
-			if(d.pubkey == n.pubkey) {
-			    idxNew->dnMap[n.no] = d.no;
-			    return;
-			}
-			else if(d.no == n.no) busyno = true;
-		    if(busyno) reno.push_back(std::move(n));
-		    else {
-			store.addDevice(outp, n.no, n.pubkey);
-			idxNew->dnMap[n.no] = n.no;
-		    }
-		});
-	if(!reno.empty()) {
-	    auto m = store.maxDeviceNo();
-	    for(auto &n : reno) {
-		if(m == std::numeric_limits<int>::max())
-		    throw std::runtime_error("too big device no"s);
-		store.addDevice(outp, ++m, n.pubkey);
-		idxNew->dnMap[n.no] = m;
-	    }
-	}
-	outp.reset(); // == store.saveDevices();
-	if(!peerDeviceNo) peerDeviceNo = store.knowsDevice(peer);
-	if(!peerDeviceNo) {
-	    res.error = "bad protocol"sv;
-	    co_return false;
-	}
-	idxNew->device = store.stateOf(store.pDevice());
-	CMD(s);
-    }
-    else {
-	if(!peerDeviceNo) {
-	    res.error = "bad protocol"sv;
-	    co_return false;
-	}
-	if(idxCur) {
-	    idxNew->device = idxCur->device;
-	    idxNew->dnMap = idxCur->dnMap;
-	}
-	else idxNew->device = store.stateOf(store.pDevice());
-    }
-    if(cmd == "people"sv) {
-	bool part_delete = false;
-	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-		[&](const json::value &v) -> void {
-        if(v.is_object())
-	    for(auto &[value,time] : v.as_object())
-		if(time.is_string()) {
-		    ++res.received;
-		    std::string v(value), t(time.as_string());
-		    if(part_delete) {
-			auto a = store.people_.find(v);
-			if(a == store.people_.end()) ;
-			else if(a->second >= t) return;
-			else store.people_.erase(a);
-			auto &d = store.people_delete[v];
-			if(d < t) d = t;
-		    }
-		    else {
-			auto d = store.people_delete.find(v);
-			if(d == store.people_delete.end()) ;
-			else if(d->second > t) return;
-			else store.people_delete.erase(d);
-			auto &a = store.people_[v];
-			if(a < t) a = t;
-		    }
-		}
-	else if(v.is_array()) {
-	    auto a = v.as_array();
-	    if(a.size() == 1 && a[0].is_string() &&
-	       a[0].as_string() == "delete"s)
-		part_delete = true;
-	}
-		});
-	store.savePeople();
-	idxNew->people = store.stateOf(store.pPeople());
-	CMD(s);
-    }
-    else idxNew->people = idxCur ? idxCur->people
-	    : store.stateOf(store.pPeople());
-    if(cmd == "catalog"sv) {
-	CatalogIncrementLoader loader(store);
-	co_await aReadSizedJson(s, rbuf, ao->at(1).as_int64(),
-		[&](const json::value &v) -> void {
-		    loader.add(v);
-		    ++res.received;
-		});
-	store.saveCatalog();
-	idxNew->catalog = store.stateOf(store.pCatalog());
-	CMD(s);
-    }
-    else idxNew->catalog = idxCur ? idxCur->catalog
-	    : store.stateOf(store.pCatalog());
-    const std::map<int, int> *dnMap = idxNew->dnMap.empty() ? nullptr :
-	&idxNew->dnMap;
-    while(cmd == "event"sv) {
-	int yyyymm = ao->at(1).as_int64();
-	{   auto path = store.monthPath(yyyymm);
-	    if(path.has_parent_path())
-		fs::create_directories(path.parent_path());
-	    std::ofstream out(path, std::ios::binary | std::ios::app);
-	    if(!out) { res.error = "file error"sv; co_return false; }
-	    MonthDeletions mdels;
-	    if(auto pos = out.tellp()) {
-		if(idxCur)
-		    // Заголовок в idxCur не используется
-		    idxCur->events[yyyymm].offset = pos;
-		mdels.read(path);
-	    }
-	    Schema header;
-	    co_await aReadSizedJson(s, rbuf, ao->at(2).as_int64(),
-		[&](const json::value &v) -> void {
-		    ++res.received;
-    if (v.is_object()) {
-	auto& o = v.as_object();
-	if (o.if_contains("header")) {
-	    out << json::serialize(v) << std::endl;
-	    header = Schema(o);
-	}
-	else if (!header) return;
-	else if (auto* del = o.if_contains("delete"))
-	    if(auto *ths = o.if_contains("this")) {
-    RecRefDel d = Store::parseRefDel(del->as_array(),
-				     header.reference, dnMap);
-    if(d.dev_no == -1) return;
-    RecRef t = Store::parseRef(ths->as_array(), header.reference, dnMap);
-    if(t.dev_no == -1 || t.dev_no == store.deviceNo()) return;
-    RecRefDel u;
-    if(auto *upd = o.if_contains("update")) {
-	u = Store::parseRefDel(upd->as_array(), header.reference, dnMap);
-	if(u.dev_no == -1) return;
-    }
-    MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
-    if(!mdels.ops.contains(op)) {
-	out << json::serialize(withOurDevNoDel(v, header, dnMap))
-	    << std::endl;
-	// Искать по op.del: d уже перемещён в op и обнулён (строки пусты).
-	auto p = store.events_.find(&op.del);
-	if(p != store.events_.end()) store.events_.erase(p);
-    }
-	    }
-    }
-    else if (!header) return;
-    else if (v.is_array()) {
-	Event *ep;
-	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
-			v.as_array(), header, dnMap));
-	if(ep->dev_no == -1 || ep->dev_no == store.deviceNo() ||
-	   mdels.ops.contains(*ep)) return;
-	if(store.events_.empty()) store.events_.insert(eh);
-	else {
-	    auto p = store.events_.lower_bound(eh);
-	    if(p != store.events_.end() && p->get()->eq_edit(*ep)) return;
-	    /* TODO +++ до решения вопросов с размещением delete адекватней будет исключить весь блок
-	    for(auto a = p, b = store.events_.begin(); a != b;) {
-		--a;
-		if(a->get()->event_datetime != ep->event_datetime) break;
-		if(a->get()->eq_data(*ep)) return; // TODO +++ 1. удалить у собеседника, иначе он удалит наше событие. А если событие добавлено уже после синхронизации, то его удалять не стоит - весь вопрос в том, как это определить. 2. (Под вопросом) Всё таки записать в файл оба - событие и удаление?
-	    }
-	    for(auto a = p, e = store.events_.end();
-		a != e && a->get()->event_datetime == ep->event_datetime;
-		++a) if(a->get()->eq_data(*ep)) return;
-	    */
-	    store.events_.insert(p, eh);
-	}
-	out << json::serialize(withOurDevNo(v, header, dnMap))
-	    << std::endl;
-    }
-		});
-	    if(header) store.checkCanonical(yyyymm, header);
-	    idxNew->events[yyyymm].offset = out.tellp();
-	}
-	CMD(s);
-    }
-    // idxCur -> idxNew для отсутствующих на приёме не нужно:
-    // для клиента idxNew заполним позже в aSendAllIncrement
-    // для сервера idxCur==null, а idxNew уже заполнен одним из aSend*
-    if(cmd != "end"sv) {
-	res.error = "bad protocol"sv;
-	co_return false;
-    }
-    co_return true;
-}
-
-asio::awaitable<void> serverProtocol(SyncServer::Impl& d, ConfirmFn confirm, SyncResult& res) {
-    std::string rbuf;
-    try {
-        tcp::socket sock = co_await d.acceptor.async_accept(asio::use_awaitable);
-        auto stream = std::make_shared<SslStream>(std::move(sock), d.ctx);
-        { std::lock_guard<std::mutex> lk(d.mtx); d.stream = stream; }
-        co_await stream->async_handshake(ssl::stream_base::server, asio::use_awaitable);
-
-        std::string peer = peerPubkey(*stream);
-        res.peerPubkey = peer;
-
-	std::string clientCode, clientDb;
-	bool clientEmpty;
-        {   auto hv = json::parse(co_await aReadLine(*stream, rbuf));
-	    auto& ha = hv.as_array();
-	    clientCode = std::string(ha[0].as_string());
-	    clientDb = std::string(ha[1].as_string());
-	    clientEmpty = ha.size() > 2 && ha[2].as_string() == "empty"sv;
-	}
-        res.peerDb = clientDb;
-
-        if (clientCode != d.code) {
-	    co_await aWrite(*stream, R"(["error","bad_code"])" "\n"s);
-	    res.error = "bad_code";
-	    co_return;
-	}
-        if (clientDb != d.store.database()) {
-            json::array e;
-	    e.emplace_back("error"sv);
-	    e.emplace_back("db_mismatch"sv);
-	    e.emplace_back(d.store.database());
-            co_await aWriteLine(*stream, json::serialize(e));
-	    res.error = "db_mismatch";
-	    co_return;
-        }
-
-	if(!d.store.hasData()) {
-	    if(clientEmpty) {
-		auto peerDeviceNo = d.store.addDevice(peer);
-		co_await aStreamFullFile(*stream, d.store, "device"sv);
-		co_await aWrite(*stream, R"(["end"])" "\n"s);
-		DCMD(*stream);
-		if(cmd != "done"sv) {
-		    res.error = "bad protocol"sv;
-		    co_return;
-		}
-		SyncIndex idx;
-		idx.device = Store::stateOf(d.store.pDevice());
-		d.store.saveSyncIndex(peerDeviceNo, idx);
-		res.ok = true; res.received = 0; res.sent = 0;
-	    }
-	    else {
-		co_await aWrite(*stream, R"(["empty"])" "\n"s);
-		DCMD(*stream);
-		co_await aRecvAllWhenEmpty(*stream, d.store, peer, res,
-					   rbuf, ao, cmd);
-	    }
-	}
-	else if(clientEmpty)
-	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
-	else {
-	    SyncIndex idx;
-	    auto peerDeviceNo = d.store.knowsDevice(peer);
-	    if(peerDeviceNo)
-		d.store.loadSyncIndex(peerDeviceNo, idx);
-	    if(idx.empty)
-		co_await aSendAllToEmptyPeer(*stream, d.store, peer, res,
-					     &idx);
-	    else co_await aSendAllIncrement(*stream, d.store, peer, res,
-					    &idx, nullptr, nullptr);
-	    DCMD(*stream);
-	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
-			rbuf, ao, cmd, peerDeviceNo, nullptr, &idx))
-		co_return;
-	    co_await aWrite(*stream, R"(["done"])" "\n"s);
-	    d.store.saveSyncIndex(peerDeviceNo, idx);
-	    res.ok = true;
-	}
-        boost::system::error_code ec; stream->shutdown(ec);
-    } catch (const std::exception& e) {
-        if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
-    }
-    co_return;
-}
-} // namespace
-
-SyncResult SyncServer::wait(ConfirmFn confirm) {
-    SyncResult res;
-    asio::co_spawn(d_->io, serverProtocol(*d_, confirm, res), asio::detached);
-    d_->io.run();
-    if (!res.ok && res.error.empty() && d_->cancelled) res.error = "cancelled";
-    return res;
 }
 
 // ============================================================
 //                          SyncClient
 // ============================================================
 struct SyncClient::Impl {
+    explicit Impl(Store& s) : store(s) {}
     Store& store;
-    asio::io_context io;
-    ssl::context ctx;
-    std::shared_ptr<SslStream> stream;
-    std::mutex mtx;
-    std::atomic<bool> cancelled{false};
-    Impl(Store& s) : store(s), ctx(ssl::context::tls_client) {}
+    std::shared_ptr<Session> session;
+    bool cancelled = false;
 };
 
 SyncClient::SyncClient(Store& store) : d_(std::make_unique<Impl>(store)) {}
-SyncClient::~SyncClient() = default;
+SyncClient::~SyncClient() { cancel(); }
+
+void SyncClient::start(const PairInfo& info, ConfirmFn confirm, DoneFn done) {
+    auto sess = std::make_shared<Session>(d_->store);
+    d_->session = sess;
+    sess->confirm = std::move(confirm);
+    sess->done = std::move(done);
+    sess->info = info;
+    auto* s = new QSslSocket();
+    try {
+        s->setSslConfiguration(makeConfig(d_->store));
+    } catch (...) {
+        delete s;
+        d_->session.reset();
+        throw;
+    }
+    Session* p = sess.get();
+    sess->attach(s, [p] { p->clientGo(); });
+    s->connectToHostEncrypted(QString::fromStdString(info.ip),
+                              (quint16)info.port);
+}
 
 void SyncClient::cancel() {
     d_->cancelled = true;
-    asio::post(d_->io, [this] {
-        boost::system::error_code ec;
-        std::lock_guard<std::mutex> lk(d_->mtx);
-        if (d_->stream) d_->stream->lowest_layer().close(ec);
-    });
-}
-
-namespace {
-asio::awaitable<void> clientProtocol(SyncClient::Impl& d, const PairInfo& info, ConfirmFn confirm, SyncResult& res) {
-    std::string rbuf;
-    try {
-        tcp::socket sock(d.io);
-        tcp::endpoint ep(asio::ip::make_address(info.ip), (unsigned short)info.port);
-        co_await sock.async_connect(ep, asio::use_awaitable);
-        auto stream = std::make_shared<SslStream>(std::move(sock), d.ctx);
-        { std::lock_guard<std::mutex> lk(d.mtx); d.stream = stream; }
-        co_await stream->async_handshake(ssl::stream_base::client, asio::use_awaitable);
-
-        std::string peer = peerPubkey(*stream);
-        res.peerPubkey = peer;
-
-	bool storeEmpty = !d.store.hasData();
-        {   json::array hello;
-	    hello.emplace_back(info.code);
-	    hello.emplace_back(d.store.database());
-	    if(storeEmpty) hello.emplace_back("empty"sv);
-	    co_await aWriteLine(*stream, json::serialize(hello));
-	}
-
-        auto av = json::parse(co_await aReadLine(*stream, rbuf));
-	json::array *ao = &av.as_array();
-	std::string cmd(ao->at(0).as_string());
-	if(cmd == "error"sv) {
-            res.error = std::string(ao->at(1).as_string());
-	    if(ao->size() > 2) res.peerDb = std::string(ao->at(2).as_string());
-            co_return;
-	}
-
-	if(storeEmpty)
-	    co_await aRecvAllWhenEmpty(*stream, d.store, peer, res,
-				       rbuf, ao, cmd);
-	else if(cmd == "empty"sv)
-	    co_await aSendAllToEmptyPeer(*stream, d.store, peer, res);
-	else {
-	    SyncIndex idxOld, idxCur, idxNew;
-	    auto peerDeviceNo = d.store.knowsDevice(peer);
-	    if(peerDeviceNo) {
-		d.store.loadSyncIndex(peerDeviceNo, idxOld);
-		idxNew.dnMap = idxOld.dnMap;
-	    }
-	    d.store.listManifest(idxCur); // events заполнит Recv
-	    if(!co_await aRecvAllIncrement(*stream, d.store, peer, res,
-			rbuf, ao, cmd, peerDeviceNo, &idxCur, &idxNew))
-		co_return;
-	    co_await aSendAllIncrement(*stream, d.store, peer, res,
-				       &idxOld, &idxCur, &idxNew);
-	    CMD(*stream);
-	    if(cmd != "done"sv) {
-		res.error = "bad protocol"sv;
-		co_return;
-	    }
-	    d.store.saveSyncIndex(peerDeviceNo, idxNew);
-	    res.ok = true;
-	}
-        boost::system::error_code ec; stream->shutdown(ec);
-    } catch (const std::exception& e) {
-        if (res.error.empty()) res.error = d.cancelled ? "cancelled" : e.what();
-    }
-    co_return;
-}
-} // namespace
-
-SyncResult SyncClient::connect(const PairInfo& info, ConfirmFn confirm) {
-    SyncResult res;
-    configureContext(d_->ctx, d_->store);
-    asio::co_spawn(d_->io, clientProtocol(*d_, info, confirm, res), asio::detached);
-    d_->io.run();
-    if (!res.ok && res.error.empty() && d_->cancelled) res.error = "cancelled";
-    return res;
+    if (d_->session) d_->session->cancel();
 }
 
 } // namespace ha

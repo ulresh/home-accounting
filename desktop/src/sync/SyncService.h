@@ -29,16 +29,22 @@ struct SyncResult {
 
 // Подтверждение нового (неизвестного) устройства: вернуть true чтобы разрешить.
 using ConfirmFn = std::function<bool(const std::string& pubkey)>;
+// Завершение сессии: вызывается РОВНО один раз в потоке главного цикла (app.exec).
+using DoneFn = std::function<void(const SyncResult& res)>;
+
+// Синхронизация целиком асинхронная и работает в главном цикле событий Qt:
+// отдельного потока нет, ожидания нет — результат приходит в DoneFn.
+// Транспорт — QSslSocket (TLS с самоподписанными сертификатами обеих сторон).
 
 // Сервер: слушает входящее подключение (роль показывающего QR).
 class SyncServer {
 public:
     explicit SyncServer(Store& store);
     ~SyncServer();
-    PairInfo   listen();                 // занять свободный порт, сгенерировать код
-    SyncResult wait(ConfirmFn confirm);  // блокирующе: принять и синхронизировать
-    void       cancel();
-    struct Impl;                         // определение в .cpp (нужно корутинам)
+    PairInfo listen();                          // занять свободный порт, сгенерировать код
+    void     start(ConfirmFn confirm, DoneFn done);  // неблокирующе: принять и синхронизировать
+    void     cancel();
+    struct Impl;
 private:
     std::unique_ptr<Impl> d_;
 };
@@ -48,9 +54,9 @@ class SyncClient {
 public:
     explicit SyncClient(Store& store);
     ~SyncClient();
-    SyncResult connect(const PairInfo& info, ConfirmFn confirm);
-    void       cancel();                 // прервать синхронизацию в любом месте
-    struct Impl;                         // определение в .cpp (нужно корутинам)
+    void start(const PairInfo& info, ConfirmFn confirm, DoneFn done);
+    void cancel();                              // прервать синхронизацию в любом месте
+    struct Impl;
 private:
     std::unique_ptr<Impl> d_;
 };

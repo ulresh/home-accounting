@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(home-accounting LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)        # корутины boost::asio для асинхронной синхронизации
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
 set(BOOST_ROOT /usr/local)
 find_package(Boost CONFIG REQUIRED COMPONENTS json)
@@ -45,14 +45,15 @@ add_executable(guitest tools/guitest.cpp ${HA_SOURCES})
 foreach(tgt home-accounting guitest)
     target_include_directories(${tgt} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src /usr/local/include)
     target_link_libraries(${tgt} PRIVATE
-        Qt6::Core Qt6::Gui Qt6::Widgets
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network
         Boost::json
         OpenSSL::SSL OpenSSL::Crypto
         Threads::Threads
     )
 endforeach()
 
-# Юнит-тесты модели и синхронизации (без Qt).
+# Юнит-тесты модели и синхронизации (без GUI, но с Qt Core/Network:
+# синхронизация живёт в цикле событий Qt и работает поверх QSslSocket).
 set(HA_MODEL_SOURCES
     src/model/Paths.cpp
     src/model/Jsonl.cpp
@@ -64,6 +65,7 @@ set(HA_MODEL_SOURCES
 add_executable(syncv2test tools/syncv2test.cpp ${HA_MODEL_SOURCES})
 target_include_directories(syncv2test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src /usr/local/include)
 target_link_libraries(syncv2test PRIVATE
+    Qt6::Core Qt6::Network
     Boost::json OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
 # Кросс-платформенная проверка совместимости desktop<->Android (формат + обмен).
@@ -74,4 +76,5 @@ target_link_libraries(syncv2test PRIVATE
 add_executable(xcompattest EXCLUDE_FROM_ALL tools/xcompattest.cpp ${HA_MODEL_SOURCES})
 target_include_directories(xcompattest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src /usr/local/include)
 target_link_libraries(xcompattest PRIVATE
+    Qt6::Core Qt6::Network
     Boost::json OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
