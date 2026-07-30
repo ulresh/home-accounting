@@ -665,10 +665,50 @@ asio::awaitable<void> aSendAllIncrement(SslStream &s, Store &store,
     co_await aWrite(s, R"(["end"])" "\n"s);
 }
 
+// Присланная строка записывается «как получили»: состав и порядок полей — в том
+// числе неизвестных нам колонок — остаются прежними, меняется ТОЛЬКО значение
+// dev_no, потому что оно приходит в пространстве DN собеседника.
+// fields — columns (для события) или reference (для delete/this/update).
+void mapDevNo(json::array &a, const std::vector<std::string> &fields,
+	      const SyncIndex &idx) {
+    for(std::size_t i = 0; i < fields.size() && i < a.size(); ++i) {
+	if(fields[i] != "dev_no"sv) continue;
+	if(a[i].is_int64() || a[i].is_uint64()) {
+	    auto p = idx.dnMap.find(jsonAsDevNo(a[i]));
+	    // Строки с DN вне карты сюда не доходят (отсеяны по dev_no == -1).
+	    if(p != idx.dnMap.end()) a[i] = p->second;
+	}
+	return;
+    }
+}
+
+// Копия события с нашим dev_no.
+json::value withOurDevNo(const json::value &v, const Schema &header,
+			 const SyncIndex &idx) {
+    json::value out = v;
+    mapDevNo(out.as_array(), header.columns, idx);
+    return out;
+}
+
+// Копия строки удаления с нашим dev_no во всех ссылках.
+json::value withOurDevNoDel(const json::value &v, const Schema &header,
+			    const SyncIndex &idx) {
+    json::value out = v;
+    auto &o = out.as_object();
+    for(auto name : {"delete"sv, "this"sv, "update"sv})
+	if(auto *r = o.if_contains(name))
+	    if(r->is_array()) mapDevNo(r->as_array(), header.reference, idx);
+    return out;
+}
+
 asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	const std::string &peer, SyncResult &res,
 	std::string &rbuf, json::array *ao, std::string cmd,
 	int &peerDeviceNo, SyncIndex *idxCur, SyncIndex *idxNew) {
+    // av живёт всю функцию: ao смотрит внутрь него, а команды читаются в
+    // разных блоках. DvCMD объявлял бы av локально в каждом блоке, и после
+    // выхода из блока ao указывал бы на освобождённую память.
+    json::value av;
     if(cmd == "device"sv) {
 	std::unique_ptr<std::ofstream> outp;
 	std::list<Device> reno;
@@ -704,7 +744,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 	    co_return false;
 	}
 	idxNew->device = store.stateOf(store.pDevice());
-	DvCMD(s);
+	CMD(s);
     }
     else {
 	if(!peerDeviceNo) {
@@ -749,7 +789,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		});
 	store.savePeople();
 	idxNew->people = store.stateOf(store.pPeople());
-	DvCMD(s);
+	CMD(s);
     }
     else idxNew->people = idxCur ? idxCur->people
 	    : store.stateOf(store.pPeople());
@@ -762,7 +802,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		});
 	store.saveCatalog();
 	idxNew->catalog = store.stateOf(store.pCatalog());
-	DvCMD(s);
+	CMD(s);
     }
     else idxNew->catalog = idxCur ? idxCur->catalog
 	    : store.stateOf(store.pCatalog());
@@ -805,8 +845,7 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
     }
     MonthDeletions::Op op{std::move(d), std::move(t), std::move(u)};
     if(!mdels.ops.contains(op)) {
-	// TODO +++ dnMap
-	out << json::serialize(v) << std::endl;
+	out << json::serialize(withOurDevNoDel(v, header, *idxNew)) << std::endl;
 	// Искать по op.del: d уже перемещён в op и обнулён (строки пусты).
 	auto p = store.events_.find(&op.del);
 	if(p != store.events_.end()) store.events_.erase(p);
@@ -834,14 +873,13 @@ asio::awaitable<bool> aRecvAllIncrement(SslStream &s, Store &store,
 		++a) if(a->get()->eq_data(*ep)) return;
 	    store.events_.insert(p, eh);
 	}
-	// TODO +++ dnMap
-	out << json::serialize(v) << std::endl;
+	out << json::serialize(withOurDevNo(v, header, *idxNew)) << std::endl;
     }
 		});
 	    if(header) store.checkCanonical(yyyymm, header);
 	    idxNew->events[yyyymm].offset = out.tellp();
 	}
-	DvCMD(s);
+	CMD(s);
     }
     // idxCur -> idxNew для отсутствующих на приёме не нужно:
     // для клиента idxNew заполним позже в aSendAllIncrement

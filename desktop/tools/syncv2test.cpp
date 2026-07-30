@@ -299,6 +299,94 @@ int main() {
         check(bHasMaria && bHasPetr, "у B итоговый список людей (Мария+Пётр)");
     }
 
+    // ====== 3б. dnMap: dev_no переписывается при записи в файл ======
+    {
+        std::cout << "== 3б. dnMap при записи события/удаления ==\n";
+        fs::remove_all("/tmp/hv3ba"); fs::remove_all("/tmp/hv3bc");
+        fs::path ra = "/tmp/hv3ba/.data/home-accounting";
+        fs::path rc = "/tmp/hv3bc/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store C(rc); C.load(); C.ensureIdentity();
+        // У C своя нумерация: DN 1 занят им самим, 2 и 3 — посторонними,
+        // поэтому DN устройства A обязан смениться при сопряжении.
+        C.addDevice("PUBKEY-X");
+        C.addDevice("PUBKEY-Y");
+        C.addEvent("2026-08-01", "Хлеб", 40, "", "", "");   // C не пустой
+
+        A.addEvent("2026-08-01", "Молоко", 80, "", "1 л", "");
+        sync(A, C);
+
+        int dnAinC = C.knowsDevice(A.myPubkey());
+        check(dnAinC > 0, "C знает устройство A");
+        check(dnAinC != C.deviceNo(), "DN устройства A у C не совпадает с его собственным");
+        auto milk = findEvent(C, "Молоко");
+        check(milk && milk->dev_no == dnAinC, "в памяти C у события DN автора в системе C");
+
+        // Главное: то же самое должно быть ЗАПИСАНО в файл C.
+        Store C2(rc); C2.load();
+        auto milk2 = findEvent(C2, "Молоко");
+        check(milk2 != nullptr, "после перезагрузки C событие на месте");
+        check(milk2 && milk2->dev_no == dnAinC,
+              "в файле C dev_no заменён по dnMap на DN системы C");
+        check(milk2 && milk2->dev_no != C2.deviceNo(),
+              "событие не выглядит как своё собственное у C");
+
+        // Удаление тоже должно приехать с переписанными ссылками, иначе после
+        // перезагрузки оно не найдёт своё событие.
+        A.deleteEvent(findEvent(A, "Молоко"));
+        sync(A, C);
+        check(countSubject(C, "Молоко") == 0, "удаление дошло до C");
+        Store C3(rc); C3.load();
+        check(countSubject(C3, "Молоко") == 0,
+              "в файле C ссылки удаления переписаны: событие не воскресает");
+        check(countSubject(C3, "Хлеб") == 1, "собственное событие C не задето");
+    }
+
+    // ====== 3в. Чужая схема проходит транзитом без потерь ======
+    {
+        std::cout << "== 3в. чужая схема: состав и порядок полей сохраняются ==\n";
+        fs::remove_all("/tmp/hv3ca"); fs::remove_all("/tmp/hv3cb");
+        fs::path ra = "/tmp/hv3ca/.data/home-accounting";
+        fs::path rb = "/tmp/hv3cb/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+
+        A.addEvent("2026-09-01", "Молоко", 80, "", "", "");
+        sync(A, B);                       // сопряжение: дальше пойдёт инкремент
+
+        // Дописываем в файл A блок «чужой» схемы: другой порядок колонок и
+        // неизвестная нам колонка tags.
+        int dnFar = A.addDevice("PUBKEY-FAR");
+        {
+            std::ofstream o(ra / "Основная" / "2020" / "2609.jsonl",
+                            std::ios::binary | std::ios::app);
+            o << R"({"header":["dev_no","rec_no","edit_datetime","cost","subject",)"
+                 R"("event_datetime","comment","tags"],)"
+                 R"("reference":["dev_no","rec_no","edit_datetime"]})" << "\n";
+            o << "[" << dnFar << R"(,0,"2026-09-02 00:00:00",55,"Хлеб",)"
+                 R"("2026-09-02","свежий",["акция","хлеб"]])" << "\n";
+        }
+        sync(A, B);
+
+        int dnFarInB = B.knowsDevice("PUBKEY-FAR");
+        check(dnFarInB > 0, "B узнал о дальнем устройстве из списка A");
+        std::string got = readFile(rb / "Основная" / "2020" / "2609.jsonl");
+        std::string want = "[" + std::to_string(dnFarInB) +
+            R"(,0,"2026-09-02 00:00:00",55,"Хлеб","2026-09-02","свежий",)"
+            R"(["акция","хлеб"]])";
+        check(got.find(want) != std::string::npos,
+              "строка записана как пришла, заменён только dev_no");
+        check(got.find(R"("tags")") != std::string::npos,
+              "заголовок чужой схемы записан вместе со строкой");
+        check(countSubject(B, "Хлеб") == 1, "событие чужой схемы видно у B");
+        Store B2(rb); B2.load();
+        auto bread = findEvent(B2, "Хлеб");
+        check(bread && bread->dev_no == dnFarInB,
+              "после перезагрузки B у события DN дальнего устройства в системе B");
+        check(bread && bread->comment == "свежий",
+              "поля чужой схемы читаются после перезагрузки");
+    }
+
     // ============ 4. Удаление более позднего дубликата при синхронизации ============
     {
         std::cout << "== 4. дедупликация одинаковых событий ==\n";
