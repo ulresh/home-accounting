@@ -541,24 +541,14 @@ void Store::read_last_edit(const T &d) {
     }
 }
 
-// ---- загрузка событий ----
-// Запись удаления лежит в файле месяца yyyymmOf(target.edit_datetime), а само
-// событие — в файле месяца yyyymmOf(event_datetime); это, как правило, РАЗНЫЕ
-// файлы, причём удаление обычно позже. Поэтому удаления подгружаются отдельным
-// проходом (data.txt: «Подгружать их отдельным проходом»), и только потом
-// потоково читаются события — те, что удалены, в память не попадают.
+// ---- загрузка событий: по месяцам, потоково ----
+// Запись удаления лежит в том же месячном файле, что и удаляемое событие
+// (файл выбирается по event_datetime), поэтому месяц читается одним проходом.
 void Store::loadEvents() {
     events_.clear(); canonicalSchemaMonths_.clear();
     lastEdit_.clear(); lastEditSeq_ = 0;
-
-    auto months = enumerateMonths();
-    MonthDeletions dels;
-    for (auto& [yyyymm, path] : months) dels.read(path);
-    std::set<RecRef> deleted;
-    for (auto& op : dels.ops) deleted.insert(op.del);
-
-    for (auto& [yyyymm, path] : months) {
-	MonthEvents m(*this, &deleted);
+    for (auto& [yyyymm, path] : enumerateMonths()) {
+	MonthEvents m(*this);
         readValues(path, [&m](const json::value& v){ m.add(v); });
 	m.commit(yyyymm);
     }
@@ -569,9 +559,8 @@ void MonthEvents::add(const json::value &v) {
 	auto& o = v.as_object();
 	if (o.if_contains("header")) header = schemaFromHeader(o);
 	else if (!header) ;
-	else if (o.if_contains("delete")) {
-	    // сами удаления уже собраны отдельным проходом; здесь нужен только
-	    // учёт нашего последнего edit_datetime по записи-удалению.
+	else if (auto* del = o.if_contains("delete")) {
+	    deleted.insert(Store::parseRef(del->as_array(), header.reference));
 	    if(auto *edit = o.if_contains("this"))
 		store.read_last_edit(Store::parseRef(edit->as_array(),
 					header.reference));
@@ -580,19 +569,25 @@ void MonthEvents::add(const json::value &v) {
     else if (!header) ;
     else if (v.is_array()) {
 	Event *ep;
-	std::shared_ptr<Event> eh(ep = Store::parseEventArray(
+	monthEvents.emplace_back(ep = Store::parseEventArray(
 				v.as_array(), header));
 	store.read_last_edit(*ep);
-	if(deleted && deleted->contains(
-	       RecRef{ep->edit_datetime, ep->rec_no, ep->dev_no}))
-	    return;
-	monthEvents.emplace_back(std::move(eh));
     }
 }
 
 void MonthEvents::commit(int yyyymm) {
     if(header == canonicalSchema())
 	store.canonicalSchemaMonths_.insert(yyyymm);
+    // Удаление обычно дописано в файл после события, но после слияния хвостов
+    // при синхронизации может оказаться и до него — поэтому отсеиваем в конце.
+    if(!deleted.empty())
+	monthEvents.erase(
+	    std::remove_if(monthEvents.begin(), monthEvents.end(),
+		[this](const std::shared_ptr<Event> &p) {
+		    return deleted.contains(RecRef{p->edit_datetime,
+						   p->rec_no, p->dev_no});
+		}),
+	    monthEvents.end());
     std::sort(monthEvents.begin(), monthEvents.end(),
 	      compareEvents);
     for(auto &&p : monthEvents) store.events_.insert(store.events_.end(), p);
@@ -647,7 +642,9 @@ void Store::writeDelete(const std::string& tgtEvent,
 			const std::string& tgtEdit, int tgtRn, int tgtDn,
 			const Event *update) {
     std::string stamp = nowStamp();
-    int ym = yyyymmOf(tgtEdit);
+    // Запись удаления кладём в файл удаляемого события: файлы группируются по
+    // event_datetime (data.txt), удаление — такая же запись этого месяца.
+    int ym = yyyymmOf(tgtEvent);
     int rn = allocRecNo(stamp, ym);
     ensureCanonicalHeader(ym);
     json::object o;

@@ -269,17 +269,14 @@ struct CatalogIncrementLoader {
 };
 
 struct MonthEvents {
-    MonthEvents(Store &store, const std::set<RecRef> *deleted = nullptr)
-	: store(store), deleted(deleted)
-    {}
+    MonthEvents(Store &store) : store(store) {}
     void add(const json::value &v);
     void commit(int yyyymm);
     Store &store;
-    // Записи, удалённые {"delete":...} в ЛЮБОМ месячном файле (собраны
-    // предварительным проходом) — такие события в память не берём.
-    const std::set<RecRef> *deleted;
     Schema header;
     Store::TempEvents monthEvents;
+    // Записи, удалённые {"delete":...} в ЭТОМ же месячном файле.
+    std::set<RecRef> deleted;
 };
 
 struct MonthDeletions {

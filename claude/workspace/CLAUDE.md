@@ -46,7 +46,7 @@ cd android && tar czf - app/src app/build.gradle.kts | \
 ### Desktop (CMake-цели: `home-accounting`, `guitest`, `syncv2test`, `xcompattest`)
 ```bash
 ssh appbuild 'cd .../desktop && cmake -S . -B build && cmake --build build -j4 --target syncv2test'
-ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 42 unit-теста модели+синка
+ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 49 unit-тестов модели+синка
 ssh appbuild 'cd .../desktop && ./build/guitest'       # 60 offscreen-тестов UI
                                                       # (guitest сам ставит QT_QPA_PLATFORM=offscreen
                                                       #  и создаёт данные в ./guitest-data)
@@ -100,11 +100,11 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   это была правка (editEvent = delete старого + add нового); `update` — именно МАССИВ-ссылка
   на новую запись, как в data.txt, а не `true`.
 
-Идентичность записи = `(edit_datetime, rec_no, dev_no)`. Файл события выбирается по
-`yyyymmOf(event_datetime)`; запись удаления — по `yyyymmOf(target.edit_datetime)`.
-Загрузка — два прохода: сначала `MonthDeletions` собирает удаления по ВСЕМ месяцам (запись
-удаления обычно лежит в другом файле, чем само событие), затем месяцы читаются потоково по
-возрастанию и удалённые события в память не берутся. `raw` в памяти не держим.
+Идентичность записи = `(edit_datetime, rec_no, dev_no)`. Файл выбирается по
+`yyyymmOf(event_datetime)` — И для события, И для записи о его удалении: удаление обязано
+лежать в ТОМ ЖЕ файле, что и удаляемое событие (data.txt: «Записи группируем в файл по
+значению `<event_datetime>`»). Загрузка — потоковая, по месяцам в порядке возрастания,
+удаления применяются в пределах своего месяца; `raw` в памяти не держим.
 
 ## 5. Синхронизация (важное)
 Полностью **потоковая и прерываемая**, peer-state индекс. Не накапливать файлы/блоки в памяти.
@@ -144,10 +144,11 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 - **Висячий `else`**: в разборе `people.jsonl` ветка `else if(v.is_array())` без скобок
   прилипала к внутреннему `if(time.is_string())`, из-за чего маркер `["delete"]` не
   переключал список и удалённые люди читались как действующие.
-- **Удаления при загрузке**: запись `{"delete":...}` лежит в файле месяца
-  `yyyymmOf(target.edit_datetime)`, а само событие — в `yyyymmOf(event_datetime)`; это, как
-  правило, РАЗНЫЕ файлы. Поэтому `loadEvents()` сначала отдельным проходом собирает все
-  удаления по всем месяцам (`MonthDeletions`), и только потом читает события.
+- **Файл записи удаления**: `writeDelete` обязан выбирать месяц по `event_datetime`
+  УДАЛЯЕМОГО события, а не по его `edit_datetime`. Однажды было по `edit_datetime` — записи
+  удаления уезжали в файл следующего месяца (событие за июнь, удаление в июле), и после
+  перезапуска удалённое и старые версии правок воскресали. Не «чинить» это в загрузчике:
+  единственно верное место — `writeDelete`.
 - **Android JSON**: `kotlinx-serialization` `decodeToSequence` НЕ тянет смешанные типы значений
   в JSONL — поэтому ушли на **Jackson streaming** (он умеет инкрементный разбор произвольной
   последовательности значений). Не возвращать kotlinx.
@@ -168,7 +169,7 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   Новый `PeopleDialog`, переписанный `CatalogDialog` (пишет сразу, без «Сохранить»).
 - `guitest` — 60/60: таблица, фильтр, добавление/правка/удаление через диалоги, редакторы
   каталога и людей, перезагрузка с диска, отмена синхронизации закрытием окна.
-- `syncv2test` — 37/42. Остаток — незавершённое слияние в sync (см. ниже), не UI.
+- `syncv2test` — 44/49. Остаток — незавершённое слияние в sync (см. ниже), не UI.
 - Релиз-бинарь собирается (~1,04 МБ).
 - **`xcompattest` исключён из сборки по умолчанию** (`EXCLUDE_FROM_ALL`): написан под старый
   API (`syncBegin`/`syncPlanOutgoing`/`syncRecvFeed`/`ListManifest`), которого больше нет.

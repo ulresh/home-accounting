@@ -13,6 +13,9 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
+#include <set>
+#include <string>
 #include <thread>
 #include <chrono>
 #include <unistd.h>
@@ -59,6 +62,27 @@ static std::string readAllMonths(const fs::path& root, const std::string& db) {
     return out;
 }
 
+// Какие месячные файлы существуют в базе (например {"2606"}).
+static std::set<std::string> monthFiles(const fs::path& root, const std::string& db) {
+    std::set<std::string> out;
+    fs::path base = root / db;
+    if (!fs::exists(base)) return out;
+    for (auto& dec : fs::directory_iterator(base)) {
+        if (!dec.is_directory()) continue;
+        std::string n = dec.path().filename().string();
+        if (n.size() != 4 || !std::all_of(n.begin(), n.end(), ::isdigit)) continue;
+        for (auto& f : fs::directory_iterator(dec.path()))
+            if (f.path().extension() == ".jsonl")
+                out.insert(f.path().stem().string());
+    }
+    return out;
+}
+
+static std::string readFile(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), {});
+}
+
 static int countSubject(Store& s, const std::string& subj) {
     int n = 0;
     for (auto& e : s.events()) if (e->subject == subj) ++n;
@@ -99,6 +123,15 @@ int main() {
         check(content.find("\"update\":[") != std::string::npos,
               "редактирование помечено ссылкой update");
 
+        // Запись удаления обязана лежать в файле УДАЛЯЕМОГО события (месяц по
+        // event_datetime), а не там, куда указывает edit_datetime («сегодня»).
+        auto files = monthFiles(root, "Основная");
+        check(files == (std::set<std::string>{"2606"}),
+              "все записи, включая удаления, попали в файл события 2606.jsonl");
+        std::string june = readFile(root / "Основная" / "2020" / "2606.jsonl");
+        check(june.find("\"delete\":[") != std::string::npos,
+              "запись удаления лежит в файле удаляемого события");
+
         // перезагрузка: e1 удалён, e2 заменён
         Store s2(root); s2.load();
         check(countSubject(s2, "Кофе") == 0, "удалённое не видно после перезагрузки");
@@ -108,6 +141,34 @@ int main() {
         for (auto& e : s2.events())
             if (e->subject == "Чай зелёный" && e->comment == "акция") gotComment = true;
         check(gotComment, "комментарий читается после перезагрузки");
+    }
+
+    // ====== 1б. Правка с переносом события в другой месяц ======
+    {
+        std::cout << "== 1б. правка переносит событие в другой месяц ==\n";
+        fs::remove_all("/tmp/hv1b");
+        fs::path root = "/tmp/hv1b/.data/home-accounting";
+        Store s(root); s.load(); s.ensureIdentity();
+
+        s.addEvent("2026-06-20", "Билет", 500, "", "", "");
+        // Дата события переезжает в май. Новое событие уходит в майский файл,
+        // а удаление старого остаётся в июньском — рядом с удаляемой записью.
+        s.editEvent(findEvent(s, "Билет"), "2026-05-20", "Билет", 500, "", "", "");
+
+        auto files = monthFiles(root, "Основная");
+        check(files == (std::set<std::string>{"2605", "2606"}),
+              "новое событие ушло в файл своего месяца (2605 + 2606)");
+        std::string june = readFile(root / "Основная" / "2020" / "2606.jsonl");
+        std::string may  = readFile(root / "Основная" / "2020" / "2605.jsonl");
+        check(june.find("\"delete\":[") != std::string::npos,
+              "удаление старой версии — в файле старого события (2606)");
+        check(may.find("\"delete\":[") == std::string::npos,
+              "в файле нового события записи удаления нет (2605)");
+
+        Store s2(root); s2.load();
+        check(countSubject(s2, "Билет") == 1, "после перезагрузки ровно одна версия");
+        auto b = findEvent(s2, "Билет");
+        check(b && b->event_datetime == "2026-05-20", "видна новая дата события");
     }
 
     // ============ 2. Схемо-зависимый разбор чужого порядка/состава ============
