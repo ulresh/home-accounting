@@ -546,7 +546,7 @@ void Store::loadEvents() {
 }
 
 namespace {
-void applyDeleteFromLoad(Store::TempEvents monthEvents, const RecRef &r) {
+void applyDeleteFromLoad(Store::TempEvents &monthEvents, const RecRef &r) {
     for(auto &&p : monthEvents)
 	if(p->compare_delete(r)) {
 	    // будет сортировка, поэтому порядок не важен

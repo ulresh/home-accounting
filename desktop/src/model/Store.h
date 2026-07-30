@@ -292,9 +292,9 @@ struct MonthDeletions {
 	using is_transparent = void;
 	bool operator()(const Op &a, const Op &b) const { return a < b; }
 	bool operator()(const Op &a, const Event &b) const {
-	    return a.del.event_datetime < b.event_datetime; }
+	    return RecRef::less(a.del, b); }
 	bool operator()(const Event &a, const Op &b) const {
-	    return a.event_datetime < b.del.event_datetime; }
+	    return RecRef::less(a, b.del); }
     };
     std::set<Op, CompareOps> ops;
 };

@@ -18,11 +18,15 @@ inline int jsonAsDevNo(const json::value &v) {
 }
 
 struct RecRef {
+    template<typename A, typename B>
+    static bool less(const A &a, const B &rhs) {
+	return a.edit_datetime < rhs.edit_datetime ||
+	    (a.edit_datetime == rhs.edit_datetime &&
+	     (a.rec_no < rhs.rec_no || (a.rec_no == rhs.rec_no &&
+		a.dev_no < rhs.dev_no)));
+    }
     bool operator < (const RecRef &rhs) const {
-	return edit_datetime < rhs.edit_datetime ||
-	    (edit_datetime == rhs.edit_datetime &&
-	     (rec_no < rhs.rec_no || (rec_no == rhs.rec_no &&
-		dev_no < rhs.dev_no)));
+	return less(*this, rhs);
     }
     bool operator == (const RecRef &rhs) const {
 	return edit_datetime == rhs.edit_datetime &&
@@ -31,14 +35,6 @@ struct RecRef {
     std::string edit_datetime; int rec_no = 0; int dev_no = 0;
 };
 struct RecRefDel : RecRef {
-    bool operator < (const RecRefDel &rhs) const {
-	return event_datetime < rhs.event_datetime ||
-	    (event_datetime == rhs.event_datetime && RecRef::operator<(rhs));
-    }
-    bool operator == (const RecRefDel &rhs) const {
-	return event_datetime == rhs.event_datetime &&
-	    RecRef::operator==(rhs);
-    }
     std::string event_datetime;
 };
 
