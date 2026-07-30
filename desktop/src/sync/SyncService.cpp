@@ -254,12 +254,19 @@ struct Session : std::enable_shared_from_this<Session> {
         sock = nullptr;
         if (!s) return;
         if (hard) { s->abort(); s->deleteLater(); return; }
+        if (s->state() == QAbstractSocket::UnconnectedState) {
+            s->deleteLater();               // уже закрыт — ждать нечего
+            return;
+        }
+        // Дальше сокет живёт сам: удалится по первому из событий, а если
+        // партнёр не закрывает соединение — по сторожевому таймеру.
+        // Подписаться надо ДО disconnectFromHost(): при пустом буфере он
+        // закрывает сразу и испускает disconnected синхронно.
         QObject::connect(s, &QAbstractSocket::disconnected, s, &QObject::deleteLater);
         QObject::connect(s, &QAbstractSocket::errorOccurred, s,
                          [s](QAbstractSocket::SocketError) { s->deleteLater(); });
         QTimer::singleShot(kLingerMs, s, [s] { s->deleteLater(); });
-        if (s->state() == QAbstractSocket::UnconnectedState) s->deleteLater();
-        else s->disconnectFromHost();
+        s->disconnectFromHost();
     }
 
     // -------------------------------------------------- завершение

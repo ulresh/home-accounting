@@ -694,6 +694,19 @@ ai-r.txt
 ai-r.txt
 ==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-07-30 20:11:50 | завершено 2026-07-30 20:17:15 ====
 
+Кто вызывает delete для QSslSocket?
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-07-30 20:34:31 | завершено 2026-07-30 20:35:34 ====
+
+Зачем ты в Session::detach
+создаёшь QObject::connect и QTimer::singleShot перед проверкой
+на UnconnectedState и прямым вызовом deleteLater?
+Не разумнее ли переметить их в else?
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-07-30 20:40:51 | завершено 2026-07-30 20:43:40 ====
+
 
 
 
