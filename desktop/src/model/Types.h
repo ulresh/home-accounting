@@ -8,6 +8,15 @@
 
 namespace ha {
 
+inline int jsonAsDevNo(const json::value &v) {
+    // boost::json разбирает неотрицательное целое как int64
+    // uint64 — только если не влезает в int64
+    auto n = v.as_int64();
+    if(n <= 0 || n >= std::numeric_limits<int>::max())
+	throw std::runtime_error("bad DN value"s);
+    return n;
+}
+
 struct RecRef {
     bool operator < (const RecRef &rhs) const {
 	return edit_datetime < rhs.edit_datetime ||
@@ -58,9 +67,7 @@ struct Device {
     {}
     Device(const json::value &v, bool add_name = true) {
 	auto& a = v.as_array();
-	// boost::json разбирает неотрицательное целое как int64, поэтому
-	// as_uint64() к разобранному значению неприменим.
-	no = a[0].is_uint64() ? (int)a[0].as_uint64() : (int)a[0].as_int64();
+	no = jsonAsDevNo(a[0]);
 	pubkey = std::string(a[1].as_string());
 	if(add_name && a.size() > 2 && a[2].is_string())
 	    name = std::string(a[2].as_string());

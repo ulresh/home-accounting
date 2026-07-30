@@ -275,8 +275,6 @@ struct MonthEvents {
     Store &store;
     Schema header;
     Store::TempEvents monthEvents;
-    // Записи, удалённые {"delete":...} в ЭТОМ же месячном файле.
-    std::set<RecRef> deleted;
 };
 
 struct MonthDeletions {

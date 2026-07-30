@@ -554,13 +554,27 @@ void Store::loadEvents() {
     }
 }
 
+namespace {
+void applyDeleteFromLoad(Store::TempEvents monthEvents, const RecRef &r) {
+    for(auto &&p : monthEvents)
+	if(p->compare_delete(r)) {
+	    // будет сортировка, поэтому порядок не важен
+	    auto &b = monthEvents.back();
+	    if(p.get() != b.get()) p = b;
+	    monthEvents.resize(monthEvents.size() - 1);
+	    break;
+	}
+}
+}
+
 void MonthEvents::add(const json::value &v) {
     if (v.is_object()) {
 	auto& o = v.as_object();
 	if (o.if_contains("header")) header = schemaFromHeader(o);
 	else if (!header) ;
 	else if (auto* del = o.if_contains("delete")) {
-	    deleted.insert(Store::parseRef(del->as_array(), header.reference));
+	    RecRef d = Store::parseRef(del->as_array(), header.reference);
+	    applyDeleteFromLoad(monthEvents, d);
 	    if(auto *edit = o.if_contains("this"))
 		store.read_last_edit(Store::parseRef(edit->as_array(),
 					header.reference));
@@ -578,16 +592,6 @@ void MonthEvents::add(const json::value &v) {
 void MonthEvents::commit(int yyyymm) {
     if(header == canonicalSchema())
 	store.canonicalSchemaMonths_.insert(yyyymm);
-    // Удаление обычно дописано в файл после события, но после слияния хвостов
-    // при синхронизации может оказаться и до него — поэтому отсеиваем в конце.
-    if(!deleted.empty())
-	monthEvents.erase(
-	    std::remove_if(monthEvents.begin(), monthEvents.end(),
-		[this](const std::shared_ptr<Event> &p) {
-		    return deleted.contains(RecRef{p->edit_datetime,
-						   p->rec_no, p->dev_no});
-		}),
-	    monthEvents.end());
     std::sort(monthEvents.begin(), monthEvents.end(),
 	      compareEvents);
     for(auto &&p : monthEvents) store.events_.insert(store.events_.end(), p);
