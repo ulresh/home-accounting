@@ -46,7 +46,7 @@ cd android && tar czf - app/src app/build.gradle.kts | \
 ### Desktop (CMake-цели: `home-accounting`, `guitest`, `syncv2test`, `xcompattest`)
 ```bash
 ssh appbuild 'cd .../desktop && cmake -S . -B build && cmake --build build -j4 --target syncv2test'
-ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 49 unit-тестов модели+синка
+ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 61 unit-тест модели+синка
 ssh appbuild 'cd .../desktop && ./build/guitest'       # 60 offscreen-тестов UI
                                                       # (guitest сам ставит QT_QPA_PLATFORM=offscreen
                                                       #  и создаёт данные в ./guitest-data)
@@ -99,6 +99,12 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   где ref = поля из `reference` (edit_datetime,rec_no,dev_no). Наличие `update` означает, что
   это была правка (editEvent = delete старого + add нового); `update` — именно МАССИВ-ссылка
   на новую запись, как в data.txt, а не `true`.
+
+`MonthDeletions::ops` — `std::set<Op, CompareOps>` с прозрачным компаратором, как
+`CompareEventsSet` у `Store::Events`. Ключ поиска — `Event`, сравнение идёт по идентичности
+записи (`RecRef::less`: edit_datetime, rec_no, dev_no), поэтому `ops.contains(ev)` отвечает
+«удалена ли ИМЕННО эта запись». `event_datetime` в порядок не входит: у `RecRefDel` своих
+операторов нет, он сравнивается как `RecRef`.
 
 Идентичность записи = `(edit_datetime, rec_no, dev_no)`. Файл выбирается по
 `yyyymmOf(event_datetime)` — И для события, И для записи о его удалении: удаление обязано
@@ -170,15 +176,13 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 - Desktop UI приведён к новому API модели: события — `shared_ptr<Event>`, поля
   `people/volume/comment` — обычные строки, `people()`/`catalog()` — map с отметками времени.
   Новый `PeopleDialog`, переписанный `CatalogDialog` (пишет сразу, без «Сохранить»).
-- `guitest` — 60/60: таблица, фильтр, добавление/правка/удаление через диалоги, редакторы
-  каталога и людей, перезагрузка с диска, отмена синхронизации закрытием окна.
-- `syncv2test` — 45/49. Остаток — незавершённое слияние в sync (см. ниже), не UI.
+- `guitest` — 60/60, `syncv2test` — 57/61. Красное — НЕ в UI, см. ниже.
 - Релиз-бинарь собирается (~1,04 МБ).
 - **`xcompattest` исключён из сборки по умолчанию** (`EXCLUDE_FROM_ALL`): написан под старый
   API (`syncBegin`/`syncPlanOutgoing`/`syncRecvFeed`/`ListManifest`), которого больше нет.
 - Android не трогали; кросс-тесты обе стороны из-за `xcompattest` сейчас не гоняются.
 
-### Что ещё не работает в sync (падает в `syncv2test`)
+### Что сейчас красное
 - Дедупликация одинаковых событий выполняется только на стороне сервера: у клиента дубликат
   остаётся и в памяти, и в файлах.
 - В `SyncService.cpp` остались пометки `// TODO +++ dnMap` в приёме событий/удалений.

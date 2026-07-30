@@ -90,14 +90,6 @@ static int countSubject(Store& s, const std::string& subj) {
     return n;
 }
 
-// Ключ поиска в MonthDeletions::ops — Event; CompareOps сравнивает
-// только event_datetime.
-static Event atDate(const std::string& event_datetime) {
-    Event e;
-    e.event_datetime = event_datetime;
-    return e;
-}
-
 // Модель отдаёт события как shared_ptr — их же принимают deleteEvent/editEvent.
 static std::shared_ptr<Event> findEvent(Store& s, const std::string& subj) {
     for (auto& e : s.events()) if (e->subject == subj) return e;
@@ -180,53 +172,45 @@ int main() {
         check(b && b->event_datetime == "2026-05-20", "видна новая дата события");
     }
 
-    // ====== 1в. Порядок RecRefDel и поиск в MonthDeletions::ops ======
+    // ====== 1в. Поиск удалений в MonthDeletions::ops ======
     {
-        std::cout << "== 1в. RecRefDel: порядок и поиск удалений ==\n";
-        // порядок: event_datetime старше edit_datetime
-        RecRefDel a, b;
-        a.event_datetime = "2026-06-01"; a.edit_datetime = "2026-07-01 00:00:00";
-        b.event_datetime = "2026-07-01"; b.edit_datetime = "2026-01-01 00:00:00";
-        check(a < b && !(b < a), "RecRefDel сравнивается по event_datetime первым");
-        RecRefDel c = a;
-        check(c == a && !(c < a) && !(a < c), "равенство RecRefDel по всем четырём полям");
-        c.rec_no = a.rec_no + 1;
-        check(!(c == a) && a < c, "при равном event_datetime работает хвост от RecRef");
-
+        std::cout << "== 1в. поиск удалений в MonthDeletions::ops ==\n";
         fs::remove_all("/tmp/hv1c");
         fs::path root = "/tmp/hv1c/.data/home-accounting";
         Store s(root); s.load(); s.ensureIdentity();
         s.addEvent("2026-06-10", "Кофе", 250, "", "", "");
         s.addEvent("2026-06-11", "Чай", 120, "", "", "");
         s.addEvent("2026-07-05", "Хлеб", 40, "", "", "");
-        s.deleteEvent(findEvent(s, "Чай"));
-        s.deleteEvent(findEvent(s, "Хлеб"));
+        auto coffee = findEvent(s, "Кофе");            // не удаляем
+        auto tea    = findEvent(s, "Чай");
+        auto bread  = findEvent(s, "Хлеб");
+        s.deleteEvent(tea);
+        s.deleteEvent(bread);
 
         fs::path june = root / "Основная" / "2020" / "2606.jsonl";
         fs::path july = root / "Основная" / "2020" / "2607.jsonl";
         MonthDeletions md;
         md.read(june);
         check(md.ops.size() == 1, "из июньского файла прочитано одно удаление");
-        check(md.ops.contains(atDate("2026-06-11")),
-              "поиск по event_datetime находит удаление «Чая»");
-        check(!md.ops.contains(atDate("2026-06-10")),
-              "за дату, где удалений нет, ничего не находится");
+        check(md.ops.contains(*tea),
+              "удалённая запись находится по своей идентичности");
+        check(!md.ops.contains(*coffee), "неудалённая запись не находится");
+        // ключ поиска — (edit_datetime, rec_no, dev_no), а не дата события
+        Event twin = *tea;
+        twin.rec_no = tea->rec_no + 1;
+        check(!md.ops.contains(twin),
+              "другая запись с той же датой события не находится");
 
         MonthDeletions all;
         all.read(june);
         all.read(july);
         check(all.ops.size() == 2, "удаления двух месяцев собраны в один ops");
-        check(all.ops.contains(atDate("2026-07-05")), "июльское удаление найдено");
-        auto r6 = all.ops.equal_range(atDate("2026-06-11"));
-        check(std::distance(r6.first, r6.second) == 1 &&
-              r6.first->del.event_datetime == "2026-06-11",
-              "equal_range по event_datetime: удаление «Чая»");
-        auto r7 = all.ops.equal_range(atDate("2026-07-05"));
-        check(std::distance(r7.first, r7.second) == 1 &&
-              r7.first->del.event_datetime == "2026-07-05",
-              "equal_range по event_datetime: удаление «Хлеба»");
-        auto r5 = all.ops.equal_range(atDate("2026-05-01"));
-        check(r5.first == r5.second, "дата без удалений даёт пустой диапазон");
+        check(all.ops.contains(*bread), "июльское удаление найдено");
+        check(all.ops.contains(*tea), "июньское удаление тоже на месте");
+        auto r = all.ops.equal_range(*tea);
+        check(std::distance(r.first, r.second) == 1 &&
+              r.first->del.event_datetime == "2026-06-11",
+              "equal_range даёт ровно одно удаление и это «Чай»");
     }
 
     // ============ 2. Схемо-зависимый разбор чужого порядка/состава ============
