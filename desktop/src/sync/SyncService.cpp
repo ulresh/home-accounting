@@ -490,6 +490,7 @@ struct Session : std::enable_shared_from_this<Session> {
     }
 
     // TODO +++ review mark, double file read = scanRange & sendFile
+    // TODO +++ разобраться с idx(idxPeer) idxCur idxNew - Клод очень криво перенёс их из прошлого алгоритма
     MonthSyncData queueFullEventFile(int yyyymm, const fs::path& path) {
         uint64_t size = fs::file_size(path);
         auto sc = scanRange(path, 0, size);
@@ -512,7 +513,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     // Хвост файла начиная с того, что у партнёра уже есть. Если хвост не
     // начинается с header'а — предпосылаем действующую у партнёра схему.
-    MonthSyncData queueEventFile(int yyyymm, const fs::path& path,
+    MonthSyncData queueTailEventFile(int yyyymm, const fs::path& path,
                                  const MonthSyncData& peerData) {
         MonthSyncData cur;
         cur.offset = (int64_t)fs::file_size(path);
@@ -553,7 +554,7 @@ struct Session : std::enable_shared_from_this<Session> {
     // ============================================================
     //     Отдать всё партнёру, у которого ещё ничего нет
     // ============================================================
-    void sendAllToEmptyPeer(SyncIndex* idxp, Cont next) {
+    void sendAllToEmptyPeer(bool recv_follow, Cont next) {
         peerDeviceNo = store.addDevice(peer);
         queueFullFile("device"sv);
         ++res.sent;
@@ -565,15 +566,14 @@ struct Session : std::enable_shared_from_this<Session> {
             queueFullFile("catalog"sv);
             ++res.sent;
         }
-        SyncIndex* target = idxp ? idxp : &idx;
-        store.listManifest(*target);
+        store.listManifest(idx);
         for (auto& [yyyymm, path] : store.enumerateMonths()) {
-            target->events[yyyymm] = queueFullEventFile(yyyymm, path);
+            idx.events[yyyymm] = queueFullEventFile(yyyymm, path);
             ++res.sent;
         }
         send(R"(["end"])" "\n"s);
-        if (idxp) { flush(next); return; }
-        flush([this, next] {
+        if (recv_follow) flush(next);
+        else flush([this, next] {
             cmdNext([this, next] {
                 if (cmd != "done"sv) { res.error = "bad protocol"sv; next(); return; }
                 store.saveSyncIndex(peerDeviceNo, idx);
@@ -781,11 +781,11 @@ struct Session : std::enable_shared_from_this<Session> {
                 auto c = pCur->events.find(yyyymm);
                 if (c == pCur->events.end())
                     pNew->events[yyyymm] =
-                        queueEventFile(yyyymm, path, pd->second);
+                        queueTailEventFile(yyyymm, path, pd->second);
                 else if (c->second.offset > pd->second.offset)
                     queueMiddleEventFile(yyyymm, path, pd->second, c->second);
             }
-            else pd->second = queueEventFile(yyyymm, path, pd->second);
+            else pd->second = queueTailEventFile(yyyymm, path, pd->second);
             ++res.sent;
         }
         send(R"(["end"])" "\n"s);
@@ -1120,7 +1120,7 @@ struct Session : std::enable_shared_from_this<Session> {
                 return;
             }
             if (clientEmpty) {
-                sendAllToEmptyPeer(nullptr, [this] { finish(); });
+                sendAllToEmptyPeer(false, [this] { finish(); });
                 return;
             }
             peerDeviceNo = store.knowsDevice(peer);
@@ -1129,16 +1129,16 @@ struct Session : std::enable_shared_from_this<Session> {
                 cmdNext([this] {
                     recvAllIncrement(nullptr, &idx, [this](bool ok) {
                         if (!ok) { finish(); return; }
+			store.saveSyncIndex(peerDeviceNo, idx);
                         send(R"(["done"])" "\n"s);
                         flush([this] {
-                            store.saveSyncIndex(peerDeviceNo, idx);
                             res.ok = true;
                             finish();
                         });
                     });
                 });
             };
-            if (idx.empty) sendAllToEmptyPeer(&idx, after);
+            if (idx.empty) sendAllToEmptyPeer(true, after);
             else sendAllIncrement(&idx, nullptr, nullptr, after);
         });
     }
@@ -1169,7 +1169,7 @@ struct Session : std::enable_shared_from_this<Session> {
                     return;
                 }
                 if (cmd == "empty"sv) {
-                    sendAllToEmptyPeer(nullptr, [this] { finish(); });
+                    sendAllToEmptyPeer(false, [this] { finish(); });
                     return;
                 }
                 peerDeviceNo = store.knowsDevice(peer);
