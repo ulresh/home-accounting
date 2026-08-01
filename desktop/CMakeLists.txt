@@ -30,12 +30,16 @@ set(HA_SOURCES
     src/ui/SettingsDialog.cpp
     src/ui/CatalogDialog.cpp
     src/ui/PeopleDialog.cpp
+    src/ui/DevicesDialog.cpp
+    src/ui/FirstRunDialog.cpp
     src/ui/MainWindow.h
     src/ui/EventDialog.h
     src/ui/SyncDialog.h
     src/ui/SettingsDialog.h
     src/ui/CatalogDialog.h
     src/ui/PeopleDialog.h
+    src/ui/DevicesDialog.h
+    src/ui/FirstRunDialog.h
     resources/app.qrc
 )
 

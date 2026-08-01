@@ -3,7 +3,8 @@
 //   2) добавление / правка / удаление записи через диалоги (shared_ptr-события);
 //   3) редакторы каталога и людей — запись сразу в файл, без «Сохранить»;
 //   4) прежний сценарий зависания: закрытие окна синхронизации во время
-//      ожидания подключения должно прерывать его.
+//      ожидания подключения должно прерывать его;
+//   5) первый запуск (имя устройства и базы) и список устройств.
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -31,6 +32,8 @@
 #include "ui/CatalogDialog.h"
 #include "ui/PeopleDialog.h"
 #include "ui/SyncDialog.h"
+#include "ui/DevicesDialog.h"
+#include "ui/FirstRunDialog.h"
 
 namespace fs = std::filesystem;
 
@@ -346,6 +349,70 @@ static void testSyncCancel(const fs::path& root) {
     check(closed, "диалог закрыт и уничтожен без зависания");
 }
 
+// ------------------------------------------------------------------- 5 ----
+static void testFirstRunAndDevices(const fs::path& root) {
+    std::printf("== 5. первый запуск и список устройств ==\n");
+    {   // диалог первого запуска отдаёт то, что ввёл пользователь
+        FirstRunDialog dlg("host-1", "Основная");
+        auto edits = dlg.findChildren<QLineEdit*>();
+        check(edits.size() == 2, "в диалоге два поля: устройство и база");
+        check(dlg.deviceName() == "host-1" && dlg.databaseName() == "Основная",
+              "поля предзаполнены именем машины и текущей базой");
+        if (edits.size() == 2) {
+            edits[0]->setText("  Ноутбук  ");
+            edits[1]->setText(" Семейная ");
+        }
+        check(dlg.deviceName() == "Ноутбук" && dlg.databaseName() == "Семейная",
+              "введённые значения возвращаются без лишних пробелов");
+    }
+
+    ha::Store store(root);
+    store.load();
+    store.ensureIdentity();
+    store.setDeviceName("Это устройство");
+    int other = store.addDevice("PUBKEY-OTHER");
+
+    auto* dlg = new DevicesDialog(store);
+    dlg->show();
+    auto tables = dlg->findChildren<QTableWidget*>();
+    check(tables.size() == 1, "окно устройств построено");
+    if (tables.isEmpty()) { delete dlg; return; }
+    auto* t = tables[0];
+    check(t->rowCount() == 2, "показаны оба устройства");
+
+    // строка своего устройства: имя правится, флага «Отключено» нет
+    int selfRow = -1, otherRow = -1;
+    for (int r = 0; r < t->rowCount(); ++r)
+        (t->item(r, 0)->data(Qt::UserRole).toInt() == store.deviceNo()
+             ? selfRow : otherRow) = r;
+    check(selfRow >= 0 && otherRow >= 0, "своё и чужое устройства различимы");
+    check(t->item(selfRow, 1)->text() == "Это устройство",
+          "имя своего устройства показано");
+    check((t->item(selfRow, 1)->flags() & Qt::ItemIsEditable) != 0,
+          "имя своего устройства редактируется");
+    check((t->item(otherRow, 1)->flags() & Qt::ItemIsEditable) == 0,
+          "имя чужого устройства не редактируется");
+    check((t->item(selfRow, 2)->flags() & Qt::ItemIsUserCheckable) == 0,
+          "своё устройство отключить нельзя");
+    check((t->item(otherRow, 2)->flags() & Qt::ItemIsUserCheckable) != 0,
+          "чужое устройство можно отключить");
+
+    // правка имени уходит в модель и в файл
+    t->item(selfRow, 1)->setText("Переименовано");
+    check(store.deviceName() == "Переименовано", "новое имя записано в модель");
+    t->item(otherRow, 2)->setCheckState(Qt::Checked);
+    check(store.deviceDisabled("PUBKEY-OTHER"), "флаг «Отключено» установлен");
+    t->item(otherRow, 2)->setCheckState(Qt::Unchecked);
+    check(!store.deviceDisabled("PUBKEY-OTHER"), "флаг «Отключено» снят");
+    (void)other;
+
+    ha::Store re(root);
+    re.load();
+    check(re.deviceName() == "Переименовано", "имя перечитано с диска");
+    dlg->close();
+    delete dlg;
+}
+
 int main(int argc, char** argv) {
     alarm(90);                        // сторож: если зависнет — процесс убьют
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -357,6 +424,7 @@ int main(int argc, char** argv) {
     testMainWindow(base / "main" / ".data" / "home-accounting");
     testCatalogAndPeople(base / "cat" / ".data" / "home-accounting");
     testSyncCancel(base / "sync" / ".data" / "home-accounting");
+    testFirstRunAndDevices(base / "dev" / ".data" / "home-accounting");
 
     std::printf("\n==== итог: %d/%d пройдено ====\n", g_total - g_fail, g_total);
     if (!g_fail) fs::remove_all(base);

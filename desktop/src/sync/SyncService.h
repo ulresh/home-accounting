@@ -20,15 +20,21 @@ struct PairInfo {
 
 struct SyncResult {
     bool        ok = false;
-    std::string error;       // пусто если успех; "db_mismatch" / "rejected" / текст
+    std::string error;       // пусто если успех; "db_mismatch" / "disabled" / текст
     std::string peerDb;      // имя базы у партнёра (при db_mismatch)
     std::string peerPubkey;  // идентификатор устройства-партнёра
+    std::string peerName;    // имя устройства-партнёра (пусто, если ещё не знаем)
     int sent = 0;            // передано записей
     int received = 0;        // принято записей
 };
 
 // Подтверждение нового (неизвестного) устройства: вернуть true чтобы разрешить.
 using ConfirmFn = std::function<bool(const std::string& pubkey)>;
+// Собеседник опознан (по ходу сеанса): имя устройства и его открытый ключ.
+// Имя пустое, пока устройство неизвестно — тогда вызов повторится, когда
+// придёт список устройств партнёра.
+using PeerFn = std::function<void(const std::string& name,
+                                  const std::string& pubkey)>;
 // Завершение сессии: вызывается РОВНО один раз в потоке главного цикла (app.exec).
 using DoneFn = std::function<void(const SyncResult& res)>;
 
@@ -48,7 +54,7 @@ public:
     ~SyncServer();
     // Занять свободный порт, сгенерировать код и начать приём. Возвращает
     // реквизиты сопряжения (для QR) сразу, результат сеанса придёт в done.
-    PairInfo start(ConfirmFn confirm, DoneFn done);
+    PairInfo start(ConfirmFn confirm, DoneFn done, PeerFn onPeer = {});
     void     cancel();
     struct Impl;
 private:
@@ -60,7 +66,8 @@ class SyncClient {
 public:
     explicit SyncClient(Store& store);
     ~SyncClient();
-    void start(const PairInfo& info, ConfirmFn confirm, DoneFn done);
+    void start(const PairInfo& info, ConfirmFn confirm, DoneFn done,
+               PeerFn onPeer = {});
     void cancel();                              // прервать синхронизацию в любом месте
     struct Impl;
 private:

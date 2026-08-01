@@ -761,6 +761,90 @@ int main(int argc, char** argv) {
               countSubject(C, "Гвозди") == 0, "лишний круг цепочки ничего не вернул");
     }
 
+    // ====== 11. Имя устройства и признак «Отключено» ======
+    {
+        std::cout << "== 11. имя устройства и «Отключено» ==\n";
+        fs::remove_all("/tmp/hv11a"); fs::remove_all("/tmp/hv11b");
+        fs::path ra = "/tmp/hv11a/.data/home-accounting";
+        fs::path rb = "/tmp/hv11b/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+        A.setDeviceName("Ноутбук");
+        B.setDeviceName("Телефон");
+        A.addEvent("2027-01-10", "Ёлка", 100, "", "", "");
+        check(A.deviceName() == "Ноутбук", "имя своего устройства сохранено");
+
+        // имя переживает перезагрузку (лежит в device.jsonl)
+        {   Store A2(ra); A2.load();
+            check(A2.deviceName() == "Ноутбук", "имя прочитано с диска"); }
+
+        auto [r1a, r1b] = sync(A, B);
+        check(r1a.ok && r1b.ok, "синхронизация прошла");
+        // B был пуст: он получил список устройств A целиком, но своё имя
+        // синхронизация ему не поменяла
+        check(B.deviceName() == "Телефон",
+              "своё имя не затёрто синхронизацией (" + B.deviceName() + ")");
+        check(B.deviceNameOf(A.myPubkey()) == "Ноутбук",
+              "B узнал имя устройства A (" + B.deviceNameOf(A.myPubkey()) + ")");
+        check(r1b.peerName == "Ноутбук",
+              "клиенту сообщено имя партнёра (" + r1b.peerName + ")");
+
+        // Имя B доедет до A на следующей синхронизации: при первом сопряжении
+        // пустой клиент только принимает список.
+        auto [r2a, r2b] = sync(A, B);
+        check(A.deviceNameOf(B.myPubkey()) == "Телефон",
+              "A узнал имя устройства B (" + A.deviceNameOf(B.myPubkey()) + ")");
+        check(r2a.peerName == "Телефон",
+              "серверу сообщено имя партнёра (" + r2a.peerName + ")");
+        check(A.deviceName() == "Ноутбук", "своё имя у A по-прежнему своё");
+
+        // Переименование доезжает при следующей синхронизации
+        B.setDeviceName("Телефон Петра");
+        sync(A, B);
+        check(A.deviceNameOf(B.myPubkey()) == "Телефон Петра",
+              "переименование дошло до A");
+        check(B.deviceName() == "Телефон Петра", "и не откатилось у самого B");
+
+        // «Отключено»: прямая синхронизация запрещена
+        A.setDeviceDisabled(A.knowsDevice(B.myPubkey()), true);
+        {   Store A2(ra); A2.load();
+            check(A2.deviceDisabled(B.myPubkey()), "флаг записан в файл"); }
+        auto [r3a, r3b] = sync(A, B);
+        check(!r3a.ok && !r3b.ok, "с отключённым устройством обмена нет");
+        check(r3b.error == "disabled" || r3a.error == "disabled",
+              "причина отказа — disabled (" + r3a.error + "/" + r3b.error + ")");
+
+        // Обратно: B тоже не станет синхронизироваться с отключённым у себя A
+        A.setDeviceDisabled(A.knowsDevice(B.myPubkey()), false);
+        B.setDeviceDisabled(B.knowsDevice(A.myPubkey()), true);
+        auto [r4a, r4b] = sync(A, B);
+        check(!r4a.ok && !r4b.ok, "клиент не синхронизируется с отключённым");
+        check(r4b.error == "disabled",
+              "клиент сообщил disabled (" + r4b.error + ")");
+        B.setDeviceDisabled(B.knowsDevice(A.myPubkey()), false);
+
+        // Своё устройство отключить нельзя
+        B.setDeviceDisabled(B.deviceNo(), true);
+        check(!B.deviceDisabled(B.myPubkey()), "своё устройство не отключается");
+
+        // Флаг чужого устройства переносится синхронизацией...
+        A.addDevice("PUBKEY-Z");
+        A.setDeviceDisabled(A.knowsDevice("PUBKEY-Z"), true);
+        sync(A, B);
+        check(B.deviceDisabled("PUBKEY-Z"), "признак чужого устройства доехал");
+        // ...но не для текущего: B помечен «Отключено» у A, у себя B — нет
+        A.setDeviceDisabled(A.knowsDevice(B.myPubkey()), true);
+        sync(A, B);   // откажет, но это и не важно
+        A.setDeviceDisabled(A.knowsDevice(B.myPubkey()), false);
+        sync(A, B);
+        check(!B.deviceDisabled(B.myPubkey()),
+              "синхронизация не отключила B у самого B");
+        Store B2(rb); B2.load();
+        check(!B2.deviceDisabled(B2.myPubkey()) &&
+              B2.deviceName() == "Телефон Петра",
+              "после перезагрузки своё имя и флаг на месте");
+    }
+
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
     return g_fail == 0 ? 0 : 1;
 }

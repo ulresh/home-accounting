@@ -112,7 +112,10 @@ void SyncDialog::startServer() {
     try {
         ha::PairInfo info = server_->start(
             [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); },
-            [this](const ha::SyncResult& r) { onFinished(r); });
+            [this](const ha::SyncResult& r) { onFinished(r); },
+            [this](const std::string& n, const std::string&) {
+                onPeer(QString::fromStdString(n));
+            });
         showPairInfo(QString::fromStdString(info.toJson()));
     } catch (const std::exception& e) {
         status_->setText(tr("Ошибка: ") + e.what());
@@ -156,7 +159,10 @@ void SyncDialog::startClient() {
     try {
         client_->start(info,
             [this](const std::string& pk) { return askConfirm(QString::fromStdString(pk)); },
-            [this](const ha::SyncResult& r) { onFinished(r); });
+            [this](const ha::SyncResult& r) { onFinished(r); },
+            [this](const std::string& n, const std::string&) {
+                onPeer(QString::fromStdString(n));
+            });
     } catch (const std::exception& e) {
         status_->setText(tr("Ошибка: ") + e.what());
         busy_ = false; serverBtn_->setEnabled(true); clientBtn_->setEnabled(true);
@@ -172,6 +178,18 @@ void SyncDialog::onFinished(const ha::SyncResult& res) {
                               Qt::QueuedConnection);
 }
 
+// Имя устройства собеседника для показа пользователю.
+QString SyncDialog::peerTitle(const QString& name) {
+    return name.isEmpty() ? tr("неизвестное устройство")
+                          : QString("«%1»").arg(name);
+}
+
+// Собеседник опознан — показываем, с кем идёт обмен.
+void SyncDialog::onPeer(const QString& name) {
+    if (closing_) return;
+    status_->setText(tr("Обмен с %1…").arg(peerTitle(name)));
+}
+
 void SyncDialog::showResult(const ha::SyncResult& r) {
     if (closing_) return;                 // окно уже закрывают — UI не трогаем
     busy_ = false;
@@ -179,14 +197,20 @@ void SyncDialog::showResult(const ha::SyncResult& r) {
     clientBtn_->setEnabled(true);
 
     bool ok = r.ok;
-    QString message = ok ? tr("Передано %1, принято %2").arg(r.sent).arg(r.received)
-                         : tr("Не выполнено");
+    QString peer = peerTitle(QString::fromStdString(r.peerName));
+    QString message = ok
+        ? tr("Синхронизация с %1: передано %2, принято %3")
+              .arg(peer).arg(r.sent).arg(r.received)
+        : tr("Не выполнено (%1)").arg(peer);
     QString error = QString::fromStdString(r.error);
     QString peerDb = QString::fromStdString(r.peerDb);
 
     if (ok) {
         status_->setText("✓ " + message);
         QMessageBox::information(this, tr("Синхронизация"), message);
+    } else if (error == "disabled") {
+        status_->setText(tr("Устройство %1 отключено: прямая синхронизация "
+                            "с ним запрещена.").arg(peer));
     } else if (error == "db_mismatch") {
         auto btn = QMessageBox::question(this, tr("Разные базы"),
             tr("У партнёра база «%1», у вас «%2».\nПереключиться на «%1»?")

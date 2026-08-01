@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "EventDialog.h"
 #include "SyncDialog.h"
+#include "DevicesDialog.h"
 #include "SettingsDialog.h"
 #include "CatalogDialog.h"
 #include "PeopleDialog.h"
@@ -71,6 +72,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     QAction* aSync = tb->addAction(tr("Синхронизация"));
     QAction* aPpl  = tb->addAction(tr("Люди"));
     QAction* aCat  = tb->addAction(tr("Каталог"));
+    QAction* aDev  = tb->addAction(tr("Устройства"));
     QAction* aSet  = tb->addAction(tr("Настройки"));
 
     connect(aAdd,  &QAction::triggered, this, &MainWindow::onAdd);
@@ -79,6 +81,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     connect(aSync, &QAction::triggered, this, &MainWindow::onSync);
     connect(aPpl,  &QAction::triggered, this, &MainWindow::onManagePeople);
     connect(aCat,  &QAction::triggered, this, &MainWindow::onCatalog);
+    connect(aDev,  &QAction::triggered, this, &MainWindow::onDevices);
     connect(aSet,  &QAction::triggered, this, &MainWindow::onSettings);
     connect(table_, &QTableWidget::doubleClicked, this, &MainWindow::onEdit);
 
@@ -159,6 +162,11 @@ void MainWindow::onDelete() {
     if (resp != QMessageBox::Yes) return;
     store_.deleteEvent(e);
     refresh();
+}
+
+void MainWindow::onDevices() {
+    DevicesDialog dlg(store_, this);
+    dlg.exec();
 }
 
 void MainWindow::onSync() {

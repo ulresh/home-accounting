@@ -29,6 +29,8 @@ private slots:
 
 private:
     void showPairInfo(const QString& infoJson);
+    void onPeer(const QString& name);             // собеседник опознан
+    static QString peerTitle(const QString& name);
     void onFinished(const ha::SyncResult& res);   // callback из SyncService
     void showResult(const ha::SyncResult& r);     // реакция в цикле событий
     bool askConfirm(const QString& pubkey);

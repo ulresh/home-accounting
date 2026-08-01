@@ -128,6 +128,7 @@ struct Session : std::enable_shared_from_this<Session> {
     SyncResult  res;
     ConfirmFn   confirm;
     DoneFn      done;
+    PeerFn      onPeer;
     QSslSocket* sock = nullptr;
     std::vector<QMetaObject::Connection> conns;
     bool cancelled = false;
@@ -196,6 +197,7 @@ struct Session : std::enable_shared_from_this<Session> {
                 peer = peerPubkeyOf(sock);
                 if (peer.empty()) { fail("no peer certificate"s); return; }
                 res.peerPubkey = peer;
+                notePeer(true);
                 call([&] { onReady(); });
             }));
         conns.push_back(QObject::connect(s, &QSslSocket::sslErrors, s,
@@ -239,6 +241,16 @@ struct Session : std::enable_shared_from_this<Session> {
                          [s](QAbstractSocket::SocketError) { s->deleteLater(); });
         QTimer::singleShot(kLingerMs, s, [s] { s->deleteLater(); });
         s->disconnectFromHost();
+    }
+
+    // Имя устройства-партнёра: сразу после рукопожатия (если оно нам уже
+    // известно) и ещё раз, когда пришёл список устройств. force — сообщить
+    // и о неизвестном (сеанс начался, показать хотя бы «неизвестное»).
+    void notePeer(bool force = false) {
+        auto name = store.deviceNameOf(peer);
+        if (!force && (name.empty() || name == res.peerName)) return;
+        res.peerName = name;
+        if (onPeer) onPeer(name, peer);
     }
 
     // -------------------------------------------------- завершение
@@ -614,6 +626,10 @@ struct Session : std::enable_shared_from_this<Session> {
     Cont rwNext;
     std::vector<Device> newDevices;
     int newDeviceNo = 0;
+    std::string myName;
+    // У партнёра наше имя/флаг оказались не нашими: его копия списка устройств
+    // устарела, значит «партнёр это уже имеет» про неё писать нельзя.
+    bool selfDiffers = false;
     Store::People newPeople, newPeopleDelete, *pPeople = nullptr;
     std::unique_ptr<CatalogLoader> catLoader;
     std::unique_ptr<MonthEvents> monthEv;
@@ -635,13 +651,17 @@ struct Session : std::enable_shared_from_this<Session> {
             newDevices.clear();
             newDeviceNo = 0;
             peerDeviceNo = 0;
+            myName = store.deviceName();   // своё имя синхронизация не меняет
             readBlock((std::size_t)ao->at(1).as_int64(),
                 [this](const json::value& v) {
-                    newDevices.push_back(Device(v, false));
+                    newDevices.push_back(Device(v));
                     if (newDevices.back().pubkey == store.myPubkey_) {
                         if (newDeviceNo) throw std::runtime_error("bad protocol"s);
                         newDeviceNo = newDevices.back().no;
-                        newDevices.back().name = "this"s;
+                        if (newDevices.back().name != myName ||
+                            newDevices.back().disabled) selfDiffers = true;
+                        newDevices.back().name = myName;
+                        newDevices.back().disabled = false;
                     }
                     else if (newDevices.back().pubkey == peer) {
                         if (peerDeviceNo) throw std::runtime_error("bad protocol"s);
@@ -658,7 +678,11 @@ struct Session : std::enable_shared_from_this<Session> {
                     store.devices_.swap(newDevices);
                     store.deviceNo_ = newDeviceNo;
                     store.saveDevices(&idx.device);
+                    // Отдачи в этом сеансе уже не будет: пометим список
+                    // устройств неотданным, уйдёт при следующей синхронизации.
+                    if (selfDiffers) idx.device = FileState{};
                     store.saveConfig();
+                    notePeer();          // теперь имя партнёра известно
                     again();
                 });
             return;
@@ -763,7 +787,9 @@ struct Session : std::enable_shared_from_this<Session> {
             tmp = store.stateOf(store.pDevice());
             cur = &tmp;
         }
-        if (idx.device != *cur) {
+        // selfDiffers: у партнёра наше имя/флаг устарели — список надо отдать,
+        // даже если по состоянию файла кажется, что он у него уже есть.
+        if (idx.device != *cur || (recv_done && selfDiffers)) {
             queueFullFile("device"sv);
             ++res.sent;
             if (!recv_done) idx.device = *cur;
@@ -822,6 +848,7 @@ struct Session : std::enable_shared_from_this<Session> {
     std::function<void(bool)> riNext;
     std::unique_ptr<std::ofstream> devOut;
     std::list<Device> reno;
+    bool devChanged = false;
     bool peopleDelete = false;
     std::unique_ptr<CatalogIncrementLoader> catInc;
     MonthDeletions mdels;
@@ -848,17 +875,34 @@ struct Session : std::enable_shared_from_this<Session> {
                 reno.clear();
                 readBlock((std::size_t)ao->at(1).as_int64(),
                     [this](const json::value& v) {
-                        Device n(v, false);
+                        Device n(v);
                         bool busyno = false;
                         for (auto& d : store.devices_)
                             if (d.pubkey == n.pubkey) {
                                 idxNew.dnMap[n.no] = d.no;
+                                // Своё имя и свой признак «Отключено»
+                                // синхронизация не меняет.
+                                if (d.no == store.deviceNo()) {
+                                    if (d.name != n.name || d.disabled != n.disabled)
+                                        selfDiffers = true;
+                                }
+                                else {
+                                    if (d.name != n.name) {
+                                        d.name = n.name;
+                                        devChanged = true;
+                                    }
+                                    if (d.disabled != n.disabled) {
+                                        d.disabled = n.disabled;
+                                        devChanged = true;
+                                    }
+                                }
                                 return;
                             }
                             else if (d.no == n.no) busyno = true;
                         if (busyno) reno.push_back(std::move(n));
                         else {
-                            store.addDevice(devOut, n.no, n.pubkey);
+                            store.addDevice(devOut, n.no, n.pubkey,
+                                            n.name, n.disabled);
                             idxNew.dnMap[n.no] = n.no;
                         }
                     },
@@ -868,19 +912,28 @@ struct Session : std::enable_shared_from_this<Session> {
                             for (auto& n : reno) {
                                 if (m == std::numeric_limits<int>::max())
                                     throw std::runtime_error("too big device no"s);
-                                store.addDevice(devOut, ++m, n.pubkey);
+                                store.addDevice(devOut, ++m, n.pubkey,
+                                                n.name, n.disabled);
                                 idxNew.dnMap[n.no] = m;
                             }
                             reno.clear();
                         }
-                        devOut.reset();          // == store.saveDevices();
+                        devOut.reset();          // дозапись новых закрыта
+                        // Изменились имена/флаги уже известных — файл надо
+                        // переписать целиком, дозаписи тут мало.
+                        if (devChanged) { devChanged = false; store.saveDevices(); }
+                        notePeer();              // имя партнёра могло появиться
                         if (!peerDeviceNo) peerDeviceNo = store.knowsDevice(peer);
                         if (!peerDeviceNo) {
                             res.error = "bad protocol"sv;
                             riNext(false);
                             return;
                         }
-                        idxNew.device = store.stateOf(store.pDevice());
+                        // У сервера отдача уже прошла — партнёр не увидит
+                        // нашего имени до следующего сеанса; у клиента отдача
+                        // впереди, там список уйдёт (см. sendAllIncrement).
+                        idxNew.device = selfDiffers && !riSendFollow
+                                ? FileState{} : store.stateOf(store.pDevice());
                         again();
                     });
                 return;
@@ -1112,6 +1165,12 @@ struct Session : std::enable_shared_from_this<Session> {
             }
             // Код верный — этот сеанс и есть партнёр.
             if (onElected) { auto f = std::move(onElected); onElected = nullptr; f(); }
+            if (store.deviceDisabled(peer)) {
+                res.error = "disabled"sv;
+                send(R"(["error","disabled"])" "\n"s);
+                flush([this] { finish(); });
+                return;
+            }
             if (clientDb != store.database()) {
                 res.error = "db_mismatch";
                 json::array e;
@@ -1182,6 +1241,11 @@ struct Session : std::enable_shared_from_this<Session> {
     PairInfo info;
 
     void clientGo() {
+        if (store.deviceDisabled(peer)) {   // прямая синхронизация запрещена
+            res.error = "disabled"sv;
+            finish();
+            return;
+        }
         storeEmpty = !store.hasData();
         json::array hello;
         hello.emplace_back(info.code);
@@ -1259,6 +1323,7 @@ struct SyncServer::Impl {
     std::string code;
     ConfirmFn confirm;
     DoneFn done;
+    PeerFn onPeer;
     bool cancelled = false;
     bool reported = false;
 
@@ -1298,7 +1363,7 @@ struct SyncServer::Impl {
 SyncServer::SyncServer(Store& store) : d_(std::make_unique<Impl>(store)) {}
 SyncServer::~SyncServer() { cancel(); }
 
-PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
+PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done, PeerFn onPeer) {
     Impl* d = d_.get();
     d->sslConf = makeConfig(d->store);       // одна на все подключения
     // Обработчик ставим ДО listen(): иначе между «порт занят» и «есть кому
@@ -1310,6 +1375,7 @@ PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
         if (!s->setSocketDescriptor(fd)) { delete s; ::close((int)fd); return; }
         auto sess = std::make_shared<Session>(d->store);
         sess->confirm = d->confirm;
+        sess->onPeer = d->onPeer;
         sess->code = d->code;
         Session* p = sess.get();
         // Пока код не пришёл — это лишь кандидат: его провал не завершает
@@ -1331,6 +1397,7 @@ PairInfo SyncServer::start(ConfirmFn confirm, DoneFn done) {
     d->code = randomCode(8);
     d->confirm = std::move(confirm);
     d->done = std::move(done);
+    d->onPeer = std::move(onPeer);
     PairInfo info;
     info.ip = localIPv4();
     info.port = d->listener.serverPort();
@@ -1362,11 +1429,13 @@ struct SyncClient::Impl {
 SyncClient::SyncClient(Store& store) : d_(std::make_unique<Impl>(store)) {}
 SyncClient::~SyncClient() { cancel(); }
 
-void SyncClient::start(const PairInfo& info, ConfirmFn confirm, DoneFn done) {
+void SyncClient::start(const PairInfo& info, ConfirmFn confirm, DoneFn done,
+                       PeerFn onPeer) {
     auto sess = std::make_shared<Session>(d_->store);
     d_->session = sess;
     sess->confirm = std::move(confirm);
     sess->done = std::move(done);
+    sess->onPeer = std::move(onPeer);
     sess->info = info;
     auto* s = new QSslSocket();
     try {

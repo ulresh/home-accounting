@@ -172,7 +172,21 @@ public:
     int  maxDeviceNo() const;
     int addDevice(std::string_view pubkey);
     void addDevice(std::unique_ptr<std::ofstream> &outp,
-		   int no, const std::string &pubkey);
+		   int no, const std::string &pubkey,
+		   const std::string &name = {}, bool disabled = false);
+
+    // --- имя устройства и признак «Отключено» ---
+    // Имя своего устройства правит только пользователь: синхронизация его не
+    // меняет. «Отключено» = с этим устройством нельзя синхронизироваться
+    // напрямую; на своём устройстве признак не имеет смысла и не ставится.
+    const std::string &deviceName() const;            // имя текущего устройства
+    void setDeviceName(const std::string &name);
+    void setDeviceDisabled(int no, bool disabled);    // кроме текущего
+    const Device *findDevice(const std::string &pubkey) const;
+    std::string deviceNameOf(const std::string &pubkey) const;
+    bool deviceDisabled(const std::string &pubkey) const;
+    // Первый запуск: конфигурации ещё нет (спросить имя устройства и базы).
+    bool isFirstRun() const;
 
     // --- синхронизация (файловая, инкрементная, потоковая) ---
     // Манифест наших справочников (для обмена в начале сессии).
@@ -220,6 +234,7 @@ public:
 
     int  allocRecNo(const std::string &stamp, int yyyymm);
 
+    static std::string deviceLine(const Device &d);
     static std::string eventToLine(const Event& e);
     static Event *parseEventArray(const json::array& a, const Schema& s,
 				  const std::map<int, int> *dnMap = nullptr);

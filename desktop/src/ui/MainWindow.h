@@ -24,6 +24,7 @@ private slots:
     void onSync();
     void onManagePeople();
     void onCatalog();
+    void onDevices();
     void onSettings();
 
 private:

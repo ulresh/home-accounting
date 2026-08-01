@@ -48,10 +48,10 @@ cd android && tar czf - app/src app/build.gradle.kts | \
 ### Desktop (CMake-цели: `home-accounting`, `guitest`, `syncv2test`, `xcompattest`)
 ```bash
 ssh appbuild 'cd .../desktop && cmake -S . -B build && cmake --build build -j4 --target syncv2test'
-ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 114 unit-тестов модели+синка
+ssh appbuild 'cd .../desktop && ./build/syncv2test'   # 137 unit-тестов модели+синка
                                                       # (создаёт QCoreApplication: синк
                                                       #  работает в цикле событий Qt)
-ssh appbuild 'cd .../desktop && ./build/guitest'       # 60 offscreen-тестов UI
+ssh appbuild 'cd .../desktop && ./build/guitest'       # 75 offscreen-тестов UI
                                                       # (guitest сам ставит QT_QPA_PLATFORM=offscreen
                                                       #  и создаёт данные в ./guitest-data)
 ssh appbuild 'cd .../desktop && ./build/xcompattest produce <dir> | verify <dir>'  # кросс-формат
@@ -85,7 +85,13 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
 Корень: desktop `~/.data/home-accounting`, Android `filesDir`. Внутри:
 `database.jsonl` (список баз), `config.json`, `identity/` (ключ/сертификат),
 и на каждую базу — папка `<ИмяБазы>` (по умолчанию `Основная`) с:
-- `device.jsonl`
+- `device.jsonl` — `[DN,"<ключ>","<имя устройства>","disabled"]`. Имя задаёт владелец
+  устройства (первый запуск + диалог «Устройства»), `"disabled"` = запрет ПРЯМОЙ
+  синхронизации с ним. СВОЁ имя и свой флаг синхронизация не меняет никогда; имена и
+  флаги остальных — переносит. Если при слиянии мы оставили своё вместо присланного,
+  список у партнёра устарел: `selfDiffers` заставляет отдать его (в том же сеансе у
+  клиента, иначе при следующем). Прежний маркер `"this"` на месте имени читается как
+  пустое имя.
 - `people.jsonl`
 - `catalog.jsonl`
 - `sync/<DN>.jsonl` — индекс синхронизации с партнёром DN (см. §5)
@@ -170,6 +176,9 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   без дробной части (`250`).
 - JSON пишется сырым UTF-8 (без `\uXXXX`-эскейпа кириллицы) — и boost::json, и Jackson по
   умолчанию так и делают; не включать ESCAPE_NON_ASCII.
+- Имя устройства и флаг «Отключено» — часть формата `device.jsonl` (§4). ЭТО ПРАВКА
+  ФОРМАТА: на Android те же поля надо будет прочитать/записать и повторить правило
+  «своё имя и флаг синхронизация не меняет», иначе кросс-тесты разойдутся.
 - «Метки» переименованы только в UI: «Кому» (people), «Количество» (volume); имена
   полей/переменных не трогать.
 
@@ -233,7 +242,7 @@ ssh androidbuild2 'cd .../android && gradle :app:assembleDebug'    # / :app:asse
   корутины заменены callback'ами, отдельного потока (`std::thread` в `SyncDialog`) больше нет.
   Протокол и формат файлов НЕ менялись — Android трогать не потребовалось.
   Сверено с прежней реализацией: вывод `syncv2test` совпадает строка в строку.
-- `guitest` — 60/60, `syncv2test` — 114/114 (красных не осталось).
+- `guitest` — 75/75, `syncv2test` — 137/137 (красных не осталось).
 - Релиз-бинарь собирается (~0,69 МБ; был ~1,04 МБ с asio).
 - **`xcompattest` исключён из сборки по умолчанию** (`EXCLUDE_FROM_ALL`): написан под старый
   API (`syncBegin`/`syncPlanOutgoing`/`syncRecvFeed`/`ListManifest`), которого больше нет.

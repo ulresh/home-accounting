@@ -330,15 +330,19 @@ void Store::loadDevices() {
     });
 }
 
+// [DN,"<ключ>","<имя>","disabled"] — имя пишем, если оно есть либо если за
+// ним следуют признаки (позиция обязана сохраниться).
+std::string Store::deviceLine(const Device &d) {
+    json::array a;
+    a.emplace_back(d.no);
+    a.emplace_back(d.pubkey);
+    if (!d.name.empty() || d.disabled) a.emplace_back(d.name);
+    if (d.disabled) a.emplace_back("disabled"sv);
+    return json::serialize(a);
+}
 void Store::saveDevices(FileState *state) {
     std::string content;
-    for (auto& d : devices_) {
-        json::array a;
-        a.emplace_back(d.no);
-        a.emplace_back(d.pubkey);
-        if (!d.name.empty()) a.emplace_back(d.name);
-        content += json::serialize(a) + "\n";
-    }
+    for (auto& d : devices_) content += deviceLine(d) + "\n";
     if(state) state->sum(content);
     writeAtomic(pDevice(), content);
 }
@@ -839,8 +843,7 @@ void Store::ensureIdentity(bool forceSaveConfig) {
             if (d.no > maxNo) maxNo = d.no;
         }
     if (deviceNo_ <= 0) deviceNo_ = maxNo + 1;
-    Device self{deviceNo_, myPubkey_, "this"};
-    devices_.push_back(self);
+    devices_.push_back(Device{deviceNo_, myPubkey_});
     saveDevices();
     saveConfig();
 }
@@ -873,23 +876,62 @@ int Store::addDevice(std::string_view pubkey) {
 	throw std::runtime_error("too big device no"s);
     devices_.push_back(Device{++m, std::string(pubkey)});
     // saveDevices();
-    json::array a;
-    a.emplace_back(m);
-    a.emplace_back(pubkey);
-    appendLine(pDevice(), json::serialize(a));
+    appendLine(pDevice(), deviceLine(devices_.back()));
     return m;
 }
 
 void Store::addDevice(std::unique_ptr<std::ofstream> &outp,
-		      int no, const std::string &pubkey) {
-    devices_.emplace_back(no, pubkey);
+		      int no, const std::string &pubkey,
+		      const std::string &name, bool disabled) {
+    devices_.emplace_back(no, pubkey, name, disabled);
     auto op = outp.get();
     if(!op) outp.reset(op = new std::ofstream(pDevice(),
 			std::ios::binary | std::ios::app));
-    json::array a;
-    a.emplace_back(no);
-    a.emplace_back(pubkey);
-    *op << json::serialize(a) << std::endl;
+    *op << deviceLine(devices_.back()) << std::endl;
+}
+
+// --- имя и признак «Отключено» ---
+const std::string &Store::deviceName() const {
+    static const std::string empty;
+    for (auto& d : devices_) if (d.no == deviceNo_) return d.name;
+    return empty;
+}
+void Store::setDeviceName(const std::string &name) {
+    for (auto& d : devices_)
+	if (d.no == deviceNo_) {
+	    if (d.name == name) return;
+	    d.name = name;
+	    saveDevices();
+	    return;
+	}
+}
+// Своё устройство отключить нельзя: признак означает запрет ПРЯМОЙ
+// синхронизации с ним, а с самим собой мы не синхронизируемся.
+void Store::setDeviceDisabled(int no, bool disabled) {
+    if (no == deviceNo_) return;
+    for (auto& d : devices_)
+	if (d.no == no) {
+	    if (d.disabled == disabled) return;
+	    d.disabled = disabled;
+	    saveDevices();
+	    return;
+	}
+}
+const Device *Store::findDevice(const std::string &pubkey) const {
+    for (auto& d : devices_) if (d.pubkey == pubkey) return &d;
+    return nullptr;
+}
+std::string Store::deviceNameOf(const std::string &pubkey) const {
+    auto *d = findDevice(pubkey);
+    return d ? d->name : std::string();
+}
+bool Store::deviceDisabled(const std::string &pubkey) const {
+    auto *d = findDevice(pubkey);
+    return d && d->disabled;
+}
+// Первый запуск — когда ещё нет config.json (проверять ДО load()).
+bool Store::isFirstRun() const {
+    return !fs::exists(root_ / "config.json");
 }
 
 // =====================================================================
