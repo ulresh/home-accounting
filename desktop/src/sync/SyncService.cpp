@@ -490,7 +490,6 @@ struct Session : std::enable_shared_from_this<Session> {
     }
 
     // TODO +++ review mark, double file read = scanRange & sendFile
-    // TODO +++ разобраться с idx(idxPeer) idxCur idxNew - Клод очень криво перенёс их из прошлого алгоритма
     MonthSyncData queueFullEventFile(int yyyymm, const fs::path& path) {
         uint64_t size = fs::file_size(path);
         auto sc = scanRange(path, 0, size);
@@ -729,58 +728,59 @@ struct Session : std::enable_shared_from_this<Session> {
     // ============================================================
     //     Отдать приращение
     // ============================================================
-    void sendAllIncrement(SyncIndex* idxPeer, SyncIndex* pCur, SyncIndex* pNew,
-                          Cont next) {
-        // В pNew записать всё, что не попало в pCur.
-        // Туда не попадут те файлы, для которых у собеседника нет изменений.
+    // recv_done — приём уже прошёл (клиент): наше состояние на начало сеанса
+    // лежит в idxCur, а новый индекс собирается в idxNew; в idxNew попадёт
+    // только то, чего нет в idxCur. Иначе (сервер) отдача идёт первой и правит
+    // состояние собеседника idx прямо на месте.
+    void sendAllIncrement(bool recv_done, Cont next) {
         FileState tmp, *cur;
-        if (pCur) cur = &pCur->device; else {
+        if (recv_done) cur = &idxCur.device; else {
             tmp = store.stateOf(store.pDevice());
             cur = &tmp;
         }
-        if (idxPeer->device != *cur) {
+        if (idx.device != *cur) {
             queueFullFile("device"sv);
             ++res.sent;
-            if (!pCur) idxPeer->device = *cur;
+            if (!recv_done) idx.device = *cur;
         }
-        if (pCur) cur = &pCur->people; else {
+        if (recv_done) cur = &idxCur.people; else {
             tmp = store.stateOf(store.pPeople());
             cur = &tmp;
         }
-        if (idxPeer->people != *cur) {
+        if (idx.people != *cur) {
             queueFullFile("people"sv);
             ++res.sent;
-            if (!pCur) idxPeer->people = *cur;
+            if (!recv_done) idx.people = *cur;
         }
-        if (pCur) cur = &pCur->catalog; else {
+        if (recv_done) cur = &idxCur.catalog; else {
             tmp = store.stateOf(store.pCatalog());
             cur = &tmp;
         }
-        if (idxPeer->catalog != *cur) {
+        if (idx.catalog != *cur) {
             queueFullFile("catalog"sv);
             ++res.sent;
-            if (!pCur) idxPeer->catalog = *cur;
+            if (!recv_done) idx.catalog = *cur;
         }
         for (auto& [yyyymm, path] : store.enumerateMonths()) {
-            auto pd = idxPeer->events.lower_bound(yyyymm);
-            if (pd == idxPeer->events.end() || pd->first != yyyymm) {
+            auto pd = idx.events.lower_bound(yyyymm);
+            if (pd == idx.events.end() || pd->first != yyyymm) {
                 // раньше ничего не передавали
-                if (pCur) {
-                    auto c = pCur->events.find(yyyymm);
-                    if (c == pCur->events.end())
+                if (recv_done) {
+                    auto c = idxCur.events.find(yyyymm);
+                    if (c == idxCur.events.end())
                         // сейчас ничего не пришло
-                        pNew->events[yyyymm] = queueFullEventFile(yyyymm, path);
+                        idxNew.events[yyyymm] = queueFullEventFile(yyyymm, path);
                     else if (c->second.offset)
                         // сейчас пришло то, что не имеет смысла отдавать обратно
                         queueTopEventFile(yyyymm, path, c->second);
                 }
-                else idxPeer->events.emplace_hint(pd, yyyymm,
+                else idx.events.emplace_hint(pd, yyyymm,
                         queueFullEventFile(yyyymm, path));
             }
-            else if (pCur) {
-                auto c = pCur->events.find(yyyymm);
-                if (c == pCur->events.end())
-                    pNew->events[yyyymm] =
+            else if (recv_done) {
+                auto c = idxCur.events.find(yyyymm);
+                if (c == idxCur.events.end())
+                    idxNew.events[yyyymm] =
                         queueTailEventFile(yyyymm, path, pd->second);
                 else if (c->second.offset > pd->second.offset)
                     queueMiddleEventFile(yyyymm, path, pd->second, c->second);
@@ -796,8 +796,7 @@ struct Session : std::enable_shared_from_this<Session> {
     //     Принять приращение
     // ============================================================
     int riStage = 0;
-    SyncIndex* riCur = nullptr;
-    SyncIndex* riNew = nullptr;
+    bool riSendFollow = false;
     std::function<void(bool)> riNext;
     std::unique_ptr<std::ofstream> devOut;
     std::list<Device> reno;
@@ -807,9 +806,13 @@ struct Session : std::enable_shared_from_this<Session> {
     Schema monthHeader;
     const std::map<int, int>* dnMap = nullptr;
 
-    void recvAllIncrement(SyncIndex* cur, SyncIndex* nw,
-                          std::function<void(bool)> next) {
-        riCur = cur; riNew = nw; riNext = std::move(next);
+    // send_follow — отдача будет ПОСЛЕ приёма (клиент): наше состояние на
+    // начало сеанса лежит в idxCur, и приём отмечает в нём, до какого места
+    // месячные файлы пришли от собеседника. У сервера отдача уже прошла,
+    // idxCur не заполнен. Новый индекс в обоих случаях собирается в idxNew.
+    void recvAllIncrement(bool send_follow, std::function<void(bool)> next) {
+        riSendFollow = send_follow;
+        riNext = std::move(next);
         riStage = 0;
         riStep();
     }
@@ -827,14 +830,14 @@ struct Session : std::enable_shared_from_this<Session> {
                         bool busyno = false;
                         for (auto& d : store.devices_)
                             if (d.pubkey == n.pubkey) {
-                                riNew->dnMap[n.no] = d.no;
+                                idxNew.dnMap[n.no] = d.no;
                                 return;
                             }
                             else if (d.no == n.no) busyno = true;
                         if (busyno) reno.push_back(std::move(n));
                         else {
                             store.addDevice(devOut, n.no, n.pubkey);
-                            riNew->dnMap[n.no] = n.no;
+                            idxNew.dnMap[n.no] = n.no;
                         }
                     },
                     [this, again] {
@@ -844,7 +847,7 @@ struct Session : std::enable_shared_from_this<Session> {
                                 if (m == std::numeric_limits<int>::max())
                                     throw std::runtime_error("too big device no"s);
                                 store.addDevice(devOut, ++m, n.pubkey);
-                                riNew->dnMap[n.no] = m;
+                                idxNew.dnMap[n.no] = m;
                             }
                             reno.clear();
                         }
@@ -855,17 +858,17 @@ struct Session : std::enable_shared_from_this<Session> {
                             riNext(false);
                             return;
                         }
-                        riNew->device = store.stateOf(store.pDevice());
+                        idxNew.device = store.stateOf(store.pDevice());
                         again();
                     });
                 return;
             }
             if (!peerDeviceNo) { res.error = "bad protocol"sv; riNext(false); return; }
-            if (riCur) {
-                riNew->device = riCur->device;
-                riNew->dnMap = riCur->dnMap;
+            if (riSendFollow) {
+                idxNew.device = idxCur.device;
+                idxNew.dnMap = idxCur.dnMap;
             }
-            else riNew->device = store.stateOf(store.pDevice());
+            else idxNew.device = store.stateOf(store.pDevice());
         }
         if (riStage == 1) {
             riStage = 2;
@@ -905,12 +908,13 @@ struct Session : std::enable_shared_from_this<Session> {
                     },
                     [this, again] {
                         store.savePeople();
-                        riNew->people = store.stateOf(store.pPeople());
+                        idxNew.people = store.stateOf(store.pPeople());
                         again();
                     });
                 return;
             }
-            riNew->people = riCur ? riCur->people : store.stateOf(store.pPeople());
+            idxNew.people = riSendFollow ? idxCur.people
+                                         : store.stateOf(store.pPeople());
         }
         if (riStage == 2) {
             riStage = 3;
@@ -924,15 +928,16 @@ struct Session : std::enable_shared_from_this<Session> {
                     [this, again] {
                         catInc.reset();
                         store.saveCatalog();
-                        riNew->catalog = store.stateOf(store.pCatalog());
+                        idxNew.catalog = store.stateOf(store.pCatalog());
                         again();
                     });
                 return;
             }
-            riNew->catalog = riCur ? riCur->catalog : store.stateOf(store.pCatalog());
+            idxNew.catalog = riSendFollow ? idxCur.catalog
+                                          : store.stateOf(store.pCatalog());
         }
         if (riStage == 3 && cmd == "event"sv) {
-            dnMap = riNew->dnMap.empty() ? nullptr : &riNew->dnMap;
+            dnMap = idxNew.dnMap.empty() ? nullptr : &idxNew.dnMap;
             monthYm = (int)ao->at(1).as_int64();
             auto path = store.monthPath(monthYm);
             if (path.has_parent_path()) fs::create_directories(path.parent_path());
@@ -942,24 +947,24 @@ struct Session : std::enable_shared_from_this<Session> {
             mdels.ops.clear();
             monthHeader = Schema();
             if (auto pos = monthOut->tellp()) {
-                if (riCur)
-                    // Заголовок в riCur не используется
-                    riCur->events[monthYm].offset = pos;
+                if (riSendFollow)
+                    // Заголовок в idxCur не используется
+                    idxCur.events[monthYm].offset = pos;
                 mdels.read(path);
             }
             readBlock((std::size_t)ao->at(2).as_int64(),
                 [this](const json::value& v) { riEvent(v); },
                 [this, again] {
                     if (monthHeader) store.checkCanonical(monthYm, monthHeader);
-                    riNew->events[monthYm].offset = monthOut->tellp();
+                    idxNew.events[monthYm].offset = monthOut->tellp();
                     monthOut.reset();
                     again();
                 });
             return;
         }
-        // riCur -> riNew для отсутствующих на приёме не нужно:
-        // для клиента riNew заполнит sendAllIncrement,
-        // для сервера riCur==null, а riNew уже заполнен одним из send*
+        // idxCur -> idxNew для отсутствующих на приёме не нужно:
+        // у клиента idxNew дозаполнит sendAllIncrement,
+        // у сервера idxNew — то, что оставила после себя отдача
         if (cmd != "end"sv) { res.error = "bad protocol"sv; riNext(false); return; }
         riNext(true);
     }
@@ -1126,10 +1131,13 @@ struct Session : std::enable_shared_from_this<Session> {
             peerDeviceNo = store.knowsDevice(peer);
             if (peerDeviceNo) store.loadSyncIndex(peerDeviceNo, idx);
             Cont after = [this] {
+                // Отдача уже поправила состояние собеседника idx — приём
+                // продолжает тот же индекс, дополняя его принятым.
+                idxNew = idx;
                 cmdNext([this] {
-                    recvAllIncrement(nullptr, &idx, [this](bool ok) {
+                    recvAllIncrement(false, [this](bool ok) {
                         if (!ok) { finish(); return; }
-			store.saveSyncIndex(peerDeviceNo, idx);
+			store.saveSyncIndex(peerDeviceNo, idxNew);
                         send(R"(["done"])" "\n"s);
                         flush([this] {
                             res.ok = true;
@@ -1139,7 +1147,7 @@ struct Session : std::enable_shared_from_this<Session> {
                 });
             };
             if (idx.empty) sendAllToEmptyPeer(true, after);
-            else sendAllIncrement(&idx, nullptr, nullptr, after);
+            else sendAllIncrement(false, after);
         });
     }
 
@@ -1178,9 +1186,9 @@ struct Session : std::enable_shared_from_this<Session> {
                     idxNew.dnMap = idx.dnMap;
                 }
                 store.listManifest(idxCur);   // events заполнит приём
-                recvAllIncrement(&idxCur, &idxNew, [this](bool ok) {
+                recvAllIncrement(true, [this](bool ok) {
                     if (!ok) { finish(); return; }
-                    sendAllIncrement(&idx, &idxCur, &idxNew, [this] {
+                    sendAllIncrement(true, [this] {
                         cmdNext([this] {
                             if (cmd != "done"sv) {
                                 res.error = "bad protocol"sv;

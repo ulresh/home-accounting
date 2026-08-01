@@ -1436,3 +1436,34 @@ void drop(Session* s) {
 
 ==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-07-31 22:14:48 | завершено 2026-07-31 22:14:51 ====
 Failed to authenticate: OAuth session expired and could not be refreshed
+
+
+
+
+==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-01 12:51:45 | завершено 2026-08-01 12:58:57 ====
+Сделано в вашем стиле — доступ к данным через поля, подвид алгоритма через `bool`:
+
+```cpp
+void sendAllToEmptyPeer(bool recv_follow, Cont next);   // ваш
+void sendAllIncrement  (bool recv_done,   Cont next);
+void recvAllIncrement  (bool send_follow, std::function<void(bool)> next);
+```
+
+Имена подобрал так, чтобы читалась одна и та же ось — что идёт первым, отдача или приём: у сервера `sendAllToEmptyPeer(true, …)`/`sendAllIncrement(false, …)` + `recvAllIncrement(false, …)`, у клиента `recvAllIncrement(true, …)` + `sendAllIncrement(true, …)`.
+
+Внутри `idxPeer` заменён на `idx`, `pCur`/`riCur` — на `idxCur`, `pNew`/`riNew` — на `idxNew`; поля-указатели `riCur`/`riNew` выброшены, вместо них `bool riSendFollow`. Указателей на `SyncIndex` в файле не осталось совсем.
+
+Одно место потребовало решения, и его стоит проверить. С `idxPeer`/`pCur`/`pNew` разница между сторонами скрывалась в том, куда указывал «новый» индекс: у клиента — `idxNew`, а у сервера — тот же самый `idx`, который перед этим правила отдача (сервер обновляет состояние собеседника на месте и его же сохраняет). Писать в приёме `(send_follow ? idxNew : idx).device = …` — та же кривизна, только вид сбоку, поэтому я сделал приём всегда пишущим в `idxNew`, а у сервера перед приёмом добавил одну строку:
+
+```cpp
+Cont after = [this] {
+    // Отдача уже поправила состояние собеседника idx — приём
+    // продолжает тот же индекс, дополняя его принятым.
+    idxNew = idx;
+    ...
+    store.saveSyncIndex(peerDeviceNo, idxNew);
+```
+
+Поведение то же самое (приём и раньше дописывал ровно в тот объект, который оставила отдача), но теперь у обеих сторон приём заполняет `idxNew` и сохраняется `idxNew`. Копия — один `SyncIndex` (три `FileState`, `dnMap` и по записи на месяц). Если предпочитаете обойтись без копии — там подойдёт `std::move(idx)`, поскольку после отдачи сервер к `idx` больше не обращается; скажите, и поменяю.
+
+Проверки после правки: `syncv2test` — 91/99 на трёх прогонах, красные — те же 8 давно известных; `guitest` — 60/60; ASan — 0 диагностик; сборка без предупреждений. Вашу пометку `TODO +++ разобраться с idx(idxPeer) idxCur idxNew` снял, вторую (`double file read = scanRange & sendFile`) оставил. Деревья локально и на `appbuild` совпадают по md5.
