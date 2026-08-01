@@ -4,7 +4,7 @@
 //   - схемо-зависимый разбор (другой порядок/состав колонок и reference);
 //   - инкрементная файловая синхронизация (хвосты, индекс sync/DN.jsonl);
 //   - слияние people/catalog на одной стороне;
-//   - удаление более позднего дубликата при синхронизации;
+//   - одинаковые по содержанию события остаются раздельными записями;
 //   - распространение удалений между устройствами.
 #include "../src/model/Store.h"
 #include "../src/model/Paths.h"
@@ -404,9 +404,12 @@ int main(int argc, char** argv) {
               "поля чужой схемы читаются после перезагрузки");
     }
 
-    // ============ 4. Удаление более позднего дубликата при синхронизации ============
+    // ====== 4. Одинаковые по содержанию события НЕ склеиваются ======
+    // Дедупликации в требованиях больше нет: две записи с разными
+    // (edit_datetime, rec_no, dev_no) — это две РАЗНЫЕ записи, даже если все
+    // видимые поля совпадают. Слипаться они не должны ни в памяти, ни в файлах.
     {
-        std::cout << "== 4. дедупликация одинаковых событий ==\n";
+        std::cout << "== 4. одинаковые события остаются раздельными ==\n";
         fs::remove_all("/tmp/hv4a"); fs::remove_all("/tmp/hv4b");
         fs::path ra = "/tmp/hv4a/.data/home-accounting";
         fs::path rb = "/tmp/hv4b/.data/home-accounting";
@@ -423,18 +426,23 @@ int main(int argc, char** argv) {
 
         auto [ra2, rb2] = sync(A, B);
         (void)ra2; (void)rb2;
-        check(countSubject(A, "Яблоки") == 1, "после дедупликации у A одно Яблоко");
-        check(countSubject(B, "Яблоки") == 1, "после дедупликации у B одно Яблоко");
+        check(countSubject(A, "Яблоки") == 2, "у A обе записи: своя и от B");
+        check(countSubject(B, "Яблоки") == 2, "у B обе записи");
         {   // отдельно: что лежит на диске (память и файлы могут разойтись)
+            Store A2(ra); A2.load();
             Store B2(rb); B2.load();
-            check(countSubject(B2, "Яблоки") == 1,
-                  "после дедупликации в файлах B одно Яблоко");
+            check(countSubject(A2, "Яблоки") == 2, "в файлах A две записи");
+            check(countSubject(B2, "Яблоки") == 2, "в файлах B две записи");
         }
 
         // устойчивость: ещё одна синхронизация ничего не ломает и не плодит
         sync(A, B);
-        check(countSubject(A, "Яблоки") == 1, "повторная синхронизация: у A по-прежнему одно");
-        check(countSubject(B, "Яблоки") == 1, "повторная синхронизация: у B по-прежнему одно");
+        check(countSubject(A, "Яблоки") == 2, "повторная синхронизация: у A по-прежнему две");
+        check(countSubject(B, "Яблоки") == 2, "повторная синхронизация: у B по-прежнему две");
+        Store A3(ra); A3.load();
+        Store B3(rb); B3.load();
+        check(countSubject(A3, "Яблоки") == 2, "в файлах A по-прежнему две");
+        check(countSubject(B3, "Яблоки") == 2, "в файлах B по-прежнему две");
     }
 
     // ============ 5. Распространение удаления ============
@@ -568,9 +576,8 @@ int main(int argc, char** argv) {
         A.addEvent("2026-10-06", "Хвост", 5, "", "", "");
         auto [r7c, r7d] = sync(A, B);
         (void)r7c;
-        // Передаётся только хвост, а не весь файл заново (в счётчик попадает
-        // ещё и строка заголовка схемы — см. известные красные тесты п.3).
-        check(r7d.received > 0 && r7d.received <= 2,
+        // Передаётся только хвост, а не весь файл заново.
+        check(r7d.received == 1,
               "инкремент поверх большого файла: принято " +
               std::to_string(r7d.received) + " (не весь файл)");
         check(countSubject(B, "Хвост") == 1, "хвостовое событие дошло до B");
@@ -694,6 +701,55 @@ int main(int argc, char** argv) {
         spin([&] { return late.state() == QAbstractSocket::UnconnectedState; }, 5000);
         check(late.state() != QAbstractSocket::ConnectedState,
               "порт больше не слушает");
+    }
+
+    // ====== 10. Трёхзвенная цепочка A<->B, B<->C, удаление на A, снова A<->B ======
+    // Раньше этот порядок ронял процесс в отдаче приращения (SEGV на выходе
+    // из корутины). Корутин больше нет — проверяем и работу, и живучесть.
+    {
+        std::cout << "== 10. трёхзвенная цепочка ==\n";
+        fs::remove_all("/tmp/hv10a"); fs::remove_all("/tmp/hv10b");
+        fs::remove_all("/tmp/hv10c");
+        fs::path ra = "/tmp/hv10a/.data/home-accounting";
+        fs::path rb = "/tmp/hv10b/.data/home-accounting";
+        fs::path rc = "/tmp/hv10c/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity();
+        Store B(rb); B.load(); B.ensureIdentity();
+        Store C(rc); C.load(); C.ensureIdentity();
+
+        A.addEvent("2026-07-03", "Гвозди", 200, "", "1 кг", "");
+        auto nails = findEvent(A, "Гвозди");
+
+        auto [r1a, r1b] = sync(A, B);            // A -> B
+        check(r1a.ok && r1b.ok, "A<->B прошла");
+        check(countSubject(B, "Гвозди") == 1, "B получил событие A");
+
+        auto [r2b, r2c] = sync(B, C);            // B -> C (транзитом от A)
+        check(r2b.ok && r2c.ok, "B<->C прошла");
+        check(countSubject(C, "Гвозди") == 1, "событие дошло до C через B");
+
+        A.deleteEvent(nails);                    // удаление на дальнем конце
+        check(countSubject(A, "Гвозди") == 0, "A удалил у себя");
+
+        auto [r3a, r3b] = sync(A, B);            // это место роняло процесс
+        check(r3a.ok && r3b.ok, "повторная A<->B прошла (без падения)");
+        check(countSubject(B, "Гвозди") == 0, "удаление дошло от A до B");
+
+        auto [r4b, r4c] = sync(B, C);            // удаление едет дальше по цепочке
+        check(r4b.ok && r4c.ok, "повторная B<->C прошла");
+        check(countSubject(C, "Гвозди") == 0, "удаление дошло по цепочке до C");
+
+        // и не воскресает после перезагрузки
+        Store B2(rb); B2.load();
+        Store C2(rc); C2.load();
+        check(countSubject(B2, "Гвозди") == 0, "у B удаление устойчиво к перезагрузке");
+        check(countSubject(C2, "Гвозди") == 0, "у C удаление устойчиво к перезагрузке");
+
+        // ещё круг по цепочке ничего не ломает и не воскрешает
+        sync(A, B);
+        sync(B, C);
+        check(countSubject(A, "Гвозди") == 0 && countSubject(B, "Гвозди") == 0 &&
+              countSubject(C, "Гвозди") == 0, "лишний круг цепочки ничего не вернул");
     }
 
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";

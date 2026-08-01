@@ -703,7 +703,8 @@ struct Session : std::enable_shared_from_this<Session> {
                 [this](const json::value& v) {
                     *monthOut << json::serialize(v) << std::endl;
                     monthEv->add(v);
-                    ++res.received;
+                    if (!(v.is_object() && v.as_object().if_contains("header")))
+                        ++res.received;      // заголовок схемы — не запись
                 },
                 [this, again] {
                     monthOut.reset();
@@ -864,10 +865,10 @@ struct Session : std::enable_shared_from_this<Session> {
                 return;
             }
             if (!peerDeviceNo) { res.error = "bad protocol"sv; riNext(false); return; }
-            if (riSendFollow) {
-                idxNew.device = idxCur.device;
-                idxNew.dnMap = idxCur.dnMap;
-            }
+            // dnMap здесь не трогаем: карта уже взята из сохранённого индекса
+            // (clientGo / idxNew = idx у сервера), а в idxCur её нет вовсе —
+            // listManifest заполняет только манифесты справочников.
+            if (riSendFollow) idxNew.device = idxCur.device;
             else idxNew.device = store.stateOf(store.pDevice());
         }
         if (riStage == 1) {
@@ -971,16 +972,18 @@ struct Session : std::enable_shared_from_this<Session> {
 
     // Одна принятая строка месячного файла.
     void riEvent(const json::value& v) {
-        ++res.received;
         std::ofstream& out = *monthOut;
         if (v.is_object()) {
             auto& o = v.as_object();
             if (o.if_contains("header")) {
+                // Заголовок схемы — не запись, в счётчик принятого не идёт.
                 out << json::serialize(v) << std::endl;
                 monthHeader = Schema(o);
+                return;
             }
-            else if (!monthHeader) return;
-            else if (auto* del = o.if_contains("delete")) {
+            ++res.received;
+            if (!monthHeader) return;
+            if (auto* del = o.if_contains("delete")) {
                 auto* ths = o.if_contains("this");
                 if (!ths) return;
                 RecRefDel d = Store::parseRefDel(del->as_array(),
@@ -1006,6 +1009,7 @@ struct Session : std::enable_shared_from_this<Session> {
             }
             return;
         }
+        ++res.received;
         if (!monthHeader) return;
         if (!v.is_array()) return;
         Event* ep;
