@@ -429,6 +429,7 @@ struct Session : std::enable_shared_from_this<Session> {
             osp.reset();
             bool isHeader = v.is_object() && v.as_object().if_contains("header");
             if (isHeader) outHeader = Schema(v.as_object());
+            else ++res.sent;           // заголовок схемы — не запись
             if (outFirst) { outFirst = false; sendEventHead(o, isHeader); }
         }
         // Первое значение не поместилось в блок: заголовок схемы такой длины
@@ -541,8 +542,7 @@ struct Session : std::enable_shared_from_this<Session> {
                            const MonthSyncData& cur) {
         if (fs::file_size(path) < (uint64_t)cur.offset)
             throw std::runtime_error("bad data"s);
-        send(eventHead(yyyymm, (uint64_t)cur.offset));
-        sendFile(path, 0, (uint64_t)cur.offset);
+        sendRange(yyyymm, path, 0, (uint64_t)cur.offset, Schema(), false, false);
         send("\n"s);
     }
 
@@ -591,10 +591,9 @@ struct Session : std::enable_shared_from_this<Session> {
             ++res.sent;
         }
         store.listManifest(idx);
-        for (auto& [yyyymm, path] : store.enumerateMonths()) {
+        // res.sent для событий считает outScan — по записям, а не по файлам.
+        for (auto& [yyyymm, path] : store.enumerateMonths())
             queueFullEventFile(yyyymm, path, false);
-            ++res.sent;
-        }
         send(R"(["end"])" "\n"s);
         if (recv_follow) flush(next);
         else flush([this, next] {
@@ -810,7 +809,6 @@ struct Session : std::enable_shared_from_this<Session> {
                     queueMiddleEventFile(yyyymm, path, pd->second, c->second);
             }
             else queueTailEventFile(yyyymm, path, pd->second, false);
-            ++res.sent;
         }
         send(R"(["end"])" "\n"s);
         flush(next);
