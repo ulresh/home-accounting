@@ -115,53 +115,6 @@ std::string peerPubkeyOf(QSslSocket* s) {
     return crypto::publicKeyFromCertPem(std::string(pem.constData(), pem.size()));
 }
 
-// ---- разбор диапазона месячного файла (без накопления в памяти) ----
-// Нужен, чтобы ЗАРАНЕЕ узнать: начинается ли отправляемый кусок с header'а
-// (иначе придётся предпослать действующий у партнёра) и какая схема окажется
-// действующей в конце куска.
-struct RangeScan {
-    Schema lastHeader;
-    bool   firstIsHeader = false;
-};
-
-    // TODO +++ проверить, пока просто пропустил
-RangeScan scanRange(const fs::path& path, uint64_t from, uint64_t to) {
-    RangeScan r;
-    if (to <= from) return r;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error("bad data"s);
-    if (from) in.seekg((std::streamoff)from);
-    uint64_t rest = to - from;
-    MallocPtr<char> block(block_size());
-    json::stream_parser sp;
-    bool first = true;
-    while (rest && in) {
-        std::size_t want = (std::size_t)std::min<uint64_t>(rest, block_size());
-        in.read(block.get(), (std::streamsize)want);
-        std::streamsize got = in.gcount();
-        if (got <= 0) break;
-        rest -= (uint64_t)got;
-        const char* p = block.get();
-        std::size_t n = (std::size_t)got;
-        while (n) {
-            auto consumed = sp.write_some(p, n);
-            p += consumed; n -= consumed;
-            if (!sp.done()) break;
-            auto v = sp.release();
-            sp.reset();
-            if (v.is_object()) {
-                auto& o = v.as_object();
-                if (o.if_contains("header")) {
-                    r.lastHeader = Schema(o);
-                    if (first) r.firstIsHeader = true;
-                }
-            }
-            first = false;
-        }
-    }
-    return r;
-}
-
 // ============================================================
 //                          Session
 // ============================================================
@@ -195,11 +148,27 @@ struct Session : std::enable_shared_from_this<Session> {
     // ---------- отправка ----------
     // Очередь маленькая: литеральные строки протокола + ссылки на диапазоны
     // файлов; сами файлы читаются блоками прямо в сокет.
-    struct Out { std::string data; fs::path path; uint64_t from = 0, to = 0; };
+    struct Out {
+        std::string data;              // литерал (когда path пуст)
+        fs::path path;
+        uint64_t from = 0, to = 0;
+        // Событийный диапазон (yyyymm != 0): обработчик очереди разбирает
+        // прочитанное на лету — файл читается ровно один раз. Он же шлёт
+        // строку ["event",…] (её размер зависит от того, начинается ли кусок
+        // с заголовка), предпосылает head, если не начинается, и по концу
+        // записывает итог в idx.events / idxNew.events.
+        int    yyyymm = 0;
+        Schema head;                   // действующая у партнёра схема
+        bool   record = false;
+        bool   to_new = false;
+    };
     std::deque<Out> outq;
     std::ifstream outFile;
     uint64_t outPos = 0;
     MallocPtr<char> wbuf;
+    json::stream_parser osp;           // разбор отдаваемого диапазона
+    Schema outHeader;                  // последняя схема в отдаваемом куске
+    bool outFirst = false;             // ещё не решили, есть ли header в начале
     Cont writeCb;
     bool inWrite = false;
 
@@ -420,9 +389,64 @@ struct Session : std::enable_shared_from_this<Session> {
     void sendFile(const fs::path& p, uint64_t from, uint64_t to) {
         if (to > from) outq.push_back(Out{{}, p, from, to});
     }
+    // Диапазон месячного файла с разбором на лету (см. Out).
+    void sendRange(int yyyymm, const fs::path& p, uint64_t from, uint64_t to,
+                   const Schema& head, bool record, bool to_new) {
+        if (to <= from) {              // пустой кусок: заголовок и итог сразу
+            send(eventHead(yyyymm, 0));
+            if (record) recordRange(yyyymm, (int64_t)to, head, to_new);
+            return;
+        }
+        Out o;
+        o.path = p; o.from = from; o.to = to;
+        o.yyyymm = yyyymm; o.head = head;
+        o.record = record; o.to_new = to_new;
+        outq.push_back(std::move(o));
+    }
+    // Сколько нашего месячного файла теперь есть у партнёра и какая схема
+    // действует в конце отданного.
+    void recordRange(int yyyymm, int64_t offset, const Schema& header,
+                     bool to_new) {
+        (to_new ? idxNew : idx).events[yyyymm] = MonthSyncData{offset, header};
+    }
     void flush(Cont cb) {
         writeCb = std::move(cb);
         pumpWrite();
+    }
+
+    // Разбор отдаваемого куска месячного файла по ходу единственного чтения:
+    // ищем схему, действующую в конце куска, а на первом же значении решаем,
+    // начинается ли кусок с заголовка. Строку ["event",…] шлём отсюда же —
+    // её размер зависит от этого решения.
+    void outScan(const Out& o, std::streamsize got) {
+        const char* p = wbuf.get();
+        std::size_t n = (std::size_t)got;
+        while (n) {
+            auto consumed = osp.write_some(p, n);
+            p += consumed; n -= consumed;
+            if (!osp.done()) break;
+            auto v = osp.release();
+            osp.reset();
+            bool isHeader = v.is_object() && v.as_object().if_contains("header");
+            if (isHeader) outHeader = Schema(v.as_object());
+            if (outFirst) { outFirst = false; sendEventHead(o, isHeader); }
+        }
+        // Первое значение не поместилось в блок: заголовок схемы такой длины
+        // не бывает, значит кусок начинается с записи.
+        if (outFirst) { outFirst = false; sendEventHead(o, false); }
+    }
+
+    void sendEventHead(const Out& o, bool firstIsHeader) {
+        uint64_t rest = o.to - o.from;
+        if (firstIsHeader || !o.head) {
+            auto line = eventHead(o.yyyymm, rest);
+            sock->write(line.data(), (qint64)line.size());
+            return;
+        }
+        std::string ch = o.head.serialize() + "\n"s;
+        auto line = eventHead(o.yyyymm, rest + ch.size());
+        sock->write(line.data(), (qint64)line.size());
+        sock->write(ch.data(), (qint64)ch.size());
     }
 
     void pumpWrite() {
@@ -442,15 +466,30 @@ struct Session : std::enable_shared_from_this<Session> {
                 if (!outFile) { inWrite = false; fail("file error"s); return; }
                 if (o.from) outFile.seekg((std::streamoff)o.from);
                 outPos = o.from;
+                osp.reset();
+                outHeader = Schema();
+                outFirst = true;
             }
             std::size_t want = (std::size_t)std::min<uint64_t>(o.to - outPos,
                                                                block_size());
             outFile.read(wbuf.get(), (std::streamsize)want);
             std::streamsize got = outFile.gcount();
             if (got <= 0) { inWrite = false; fail("bad data"s); return; }
+            // Разбор может бросить, а сюда мы попадаем и по сигналу сокета —
+            // выпустить исключение в цикл событий нельзя.
+            if (o.yyyymm && !call([&] { outScan(o, got); })) {
+                inWrite = false;      // outq уже очищена: ссылка o недействительна
+                return;
+            }
             sock->write(wbuf.get(), (qint64)got);
             outPos += (uint64_t)got;
-            if (outPos >= o.to) { outFile.close(); outq.pop_front(); }
+            if (outPos >= o.to) {
+                outFile.close();
+                if (o.record) recordRange(o.yyyymm, (int64_t)o.to,
+                                          outHeader ? outHeader : o.head,
+                                          o.to_new);
+                outq.pop_front();
+            }
         }
         inWrite = false;
         if (writeCb) {
@@ -489,14 +528,11 @@ struct Session : std::enable_shared_from_this<Session> {
         return json::serialize(h) + "\n"s;
     }
 
-    // TODO +++ review mark, double file read = scanRange & sendFile
-    MonthSyncData queueFullEventFile(int yyyymm, const fs::path& path) {
-        uint64_t size = fs::file_size(path);
-        auto sc = scanRange(path, 0, size);
-        send(eventHead(yyyymm, size));
-        sendFile(path, 0, size);
+    // Файл целиком. Разбор по ходу отдачи даёт схему, действующую в его
+    // конце; предпосылать нечего — партнёр получает файл с начала.
+    void queueFullEventFile(int yyyymm, const fs::path& path, bool to_new) {
+        sendRange(yyyymm, path, 0, fs::file_size(path), Schema(), true, to_new);
         send("\n"s);
-        return MonthSyncData{(int64_t)size, sc.lastHeader};
     }
 
     // Отдать только начало файла — то, что партнёр ещё не видел, но что уже
@@ -512,23 +548,19 @@ struct Session : std::enable_shared_from_this<Session> {
 
     // Хвост файла начиная с того, что у партнёра уже есть. Если хвост не
     // начинается с header'а — предпосылаем действующую у партнёра схему.
-    MonthSyncData queueTailEventFile(int yyyymm, const fs::path& path,
-                                 const MonthSyncData& peerData) {
-        MonthSyncData cur;
-        cur.offset = (int64_t)fs::file_size(path);
-        if (cur.offset <= peerData.offset) return peerData;
-        auto sc = scanRange(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
-        uint64_t rest = (uint64_t)(cur.offset - peerData.offset);
-        if (sc.firstIsHeader) send(eventHead(yyyymm, rest));
-        else {
-            std::string ch = peerData.header.serialize() + "\n"s;
-            send(eventHead(yyyymm, rest + ch.size()));
-            send(ch);
+    void queueTailEventFile(int yyyymm, const fs::path& path,
+                            const MonthSyncData& peerData, bool to_new) {
+        uint64_t size = fs::file_size(path);
+        if ((int64_t)size <= peerData.offset) {
+            // Файл не вырос — отдавать нечего, состояние партнёра прежнее.
+            // Единственное место, где итог пишется не из обработчика очереди:
+            // в неё ничего и не встало.
+            recordRange(yyyymm, peerData.offset, peerData.header, to_new);
+            return;
         }
-        sendFile(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        sendRange(yyyymm, path, (uint64_t)peerData.offset, size,
+                  peerData.header, true, to_new);
         send("\n"s);
-        cur.header = sc.lastHeader ? sc.lastHeader : peerData.header;
-        return cur;
     }
 
     // Середина файла: от того, что у партнёра есть, до того, что от него же
@@ -538,15 +570,8 @@ struct Session : std::enable_shared_from_this<Session> {
                               const MonthSyncData& cur) {
         if (fs::file_size(path) < (uint64_t)cur.offset)
             throw std::runtime_error("bad data"s);
-        auto sc = scanRange(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
-        uint64_t rest = (uint64_t)(cur.offset - peerData.offset);
-        if (sc.firstIsHeader) send(eventHead(yyyymm, rest));
-        else {
-            std::string ch = peerData.header.serialize() + "\n"s;
-            send(eventHead(yyyymm, rest + ch.size()));
-            send(ch);
-        }
-        sendFile(path, (uint64_t)peerData.offset, (uint64_t)cur.offset);
+        sendRange(yyyymm, path, (uint64_t)peerData.offset, (uint64_t)cur.offset,
+                  peerData.header, false, false);
         send("\n"s);
     }
 
@@ -567,7 +592,7 @@ struct Session : std::enable_shared_from_this<Session> {
         }
         store.listManifest(idx);
         for (auto& [yyyymm, path] : store.enumerateMonths()) {
-            idx.events[yyyymm] = queueFullEventFile(yyyymm, path);
+            queueFullEventFile(yyyymm, path, false);
             ++res.sent;
         }
         send(R"(["end"])" "\n"s);
@@ -770,23 +795,21 @@ struct Session : std::enable_shared_from_this<Session> {
                     auto c = idxCur.events.find(yyyymm);
                     if (c == idxCur.events.end())
                         // сейчас ничего не пришло
-                        idxNew.events[yyyymm] = queueFullEventFile(yyyymm, path);
+                        queueFullEventFile(yyyymm, path, true);
                     else if (c->second.offset)
                         // сейчас пришло то, что не имеет смысла отдавать обратно
                         queueTopEventFile(yyyymm, path, c->second);
                 }
-                else idx.events.emplace_hint(pd, yyyymm,
-                        queueFullEventFile(yyyymm, path));
+                else queueFullEventFile(yyyymm, path, false);
             }
             else if (recv_done) {
                 auto c = idxCur.events.find(yyyymm);
                 if (c == idxCur.events.end())
-                    idxNew.events[yyyymm] =
-                        queueTailEventFile(yyyymm, path, pd->second);
+                    queueTailEventFile(yyyymm, path, pd->second, true);
                 else if (c->second.offset > pd->second.offset)
                     queueMiddleEventFile(yyyymm, path, pd->second, c->second);
             }
-            else pd->second = queueTailEventFile(yyyymm, path, pd->second);
+            else queueTailEventFile(yyyymm, path, pd->second, false);
             ++res.sent;
         }
         send(R"(["end"])" "\n"s);
