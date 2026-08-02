@@ -800,12 +800,42 @@ ai-r.txt
 ai-r.txt
 ==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-02 07:17:55 | завершено 2026-08-02 07:31:06 ====
 
+!2026-08-02 07:45:30
+* DONE * При первом запуске вводить имя устройства и имя базы данных
+* DONE * Удаление из device/people/catalog.
+* DONE * res.sent считать внутри aStream*EventFile - в большинстве случаев там есть разбор
+* DONE * Удаление из Device не значит удаление всех событий с этим DN, а только запрет будущей синхронизации с этим устройством. Возврат delete при синхонизации и событиях с удалённым DN на входе? delete на delete (cancel)?
+* OLD * eventToLine - проверить, что перед записью проверяется наличие canonicalHeader
+* DONE * сортировка по дате редактирования - плохо
+* DONE * deletedTargets_
+* DONE * Store::scanMaxOwnRn и Store::allocRecNo либо сносить либо серьёзно переделывать
+* DONE * Что такое sync_->deleteKeys и на.... оно нужно
+* DONE * Store::reserveDeviceNo переделать если не удалю
+* DONE * Что такое reserveDeviceNo
+* DONE * translateLine не пересобирать строку если DN тот же - сперва проверить, может быть так и есть уже
+* DONE * translateLine нет реализации header - скорее всего этой реализации нет и
+в read тоже
+* DONE * Store::loadEvents === check point - он перемудрил с удалениями, переделать
+* DONE * Проверить что он там накрутил с DN при синхронизации.
+* DONE * SyncService - aReadLine - заменить на разбор json
+* DONE * SyncService - подключение с неправильным кодом потребует перезапуск сервера
+* DONE * SyncService - заменить корутины на каллбаки
+* DONE * SyncService - QSslSocket
+* DONE * SyncService - renumberSelf
+
+
+
+!
 
 
 
 
 
 
+
+
+TODO CRYT
+Проверить empty NN=0
 TODO
 Добавь удаление через {"delete":[...],...} более поздней строки
 при синхронизации при совпадении
@@ -813,42 +843,19 @@ TODO
 +++ Собственно добавление {"delete":[...],...} не сделано.
 +++ Пока отказался от этой особенности, надо думать над реализацией.
 TODO
-TODO
-* DONE * При первом запуске вводить имя устройства и имя базы данных
-* DONE * Удаление из device/people/catalog.
 * Проверить Клодом на неиспользуемый код.
-* DONE * res.sent считать внутри aStream*EventFile - в большинстве случаев там есть разбор
 * ? * Device, People, Catalog переделать на только дозапись
-* DONE * Удаление из Device не значит удаление всех событий с этим DN, а только запрет будущей синхронизации с этим устройством. Возврат delete при синхонизации и событиях с удалённым DN на входе? delete на delete (cancel)?
 TODO
 * Синхронизацию проверять заново всю.
-* OLD * eventToLine - проверить, что перед записью проверяется наличие canonicalHeader
-* DONE * сортировка по дате редактирования - плохо
-* DONE * deletedTargets_
 * вложенные категории
-* DONE * Store::scanMaxOwnRn и Store::allocRecNo либо сносить либо серьёзно переделывать
-* DONE * Что такое sync_->deleteKeys и на.... оно нужно
 * Убрать построчную запись при синхронизации
 * Посмотреть где и как используется Store::categoryMembers и принять решение о необходимости переработки
-* DONE * Store::reserveDeviceNo переделать если не удалю
 * переделать inEffectHeaderAt
 TODO
 * Работа с битыми файлами?
 TODO
-* DONE * Что такое reserveDeviceNo
-* DONE * translateLine не пересобирать строку если DN тот же - сперва проверить, может быть так и есть уже
-* DONE * translateLine нет реализации header - скорее всего этой реализации нет и
-в read тоже
-* DONE * Store::loadEvents === check point - он перемудрил с удалениями, переделать
-* DONE * Проверить что он там накрутил с DN при синхронизации.
-TODO
 * QrCode - заменить все vector<bool> на bitset, не забыть использовать reserve
 * QrCode - всё же провести ревизию и алгоритма тоже
-* DONE * SyncService - aReadLine - заменить на разбор json
-* DONE * SyncService - подключение с неправильным кодом потребует перезапуск сервера
-* DONE * SyncService - заменить корутины на каллбаки
-* DONE * SyncService - QSslSocket
-* DONE * SyncService - renumberSelf
 * SyncService - !d.store.knowsDevice
 * SyncService - client storeEmpty d.store.listManifest(idx); получать сразу из d.store.save*()
 --
