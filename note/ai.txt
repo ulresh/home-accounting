@@ -849,13 +849,24 @@ ai-r.txt
 
 
 
+!2026-08-02 19:43:50
+DONE Проверить empty NN=0
+* DONE * Синхронизацию проверять заново всю.
+* DONE * переделать inEffectHeaderAt
+* DONE * вложенные категории
+* DONE * Убрать построчную запись при синхронизации
+* DONE * Посмотреть где и как используется Store::categoryMembers и принять решение о необходимости переработки
+* CANCEL * Проверить Клодом на неиспользуемый код.
+* CANCEL * ? * Device, People, Catalog переделать на только дозапись
+* DONE * SyncService - !d.store.knowsDevice
+* CANCEL * SyncService - client storeEmpty d.store.listManifest(idx); получать сразу из d.store.save*()
 
 
 
 
 
-TODO CRYT
-Проверить empty NN=0
+
+
 TODO
 Добавь удаление через {"delete":[...],...} более поздней строки
 при синхронизации при совпадении
@@ -863,21 +874,10 @@ TODO
 +++ Собственно добавление {"delete":[...],...} не сделано.
 +++ Пока отказался от этой особенности, надо думать над реализацией.
 TODO
-* Проверить Клодом на неиспользуемый код.
-* ? * Device, People, Catalog переделать на только дозапись
-TODO
-* Синхронизацию проверять заново всю.
-* вложенные категории
-* Убрать построчную запись при синхронизации
-* Посмотреть где и как используется Store::categoryMembers и принять решение о необходимости переработки
-* переделать inEffectHeaderAt
-TODO
 * Работа с битыми файлами?
 TODO
 * QrCode - заменить все vector<bool> на bitset, не забыть использовать reserve
 * QrCode - всё же провести ревизию и алгоритма тоже
-* SyncService - !d.store.knowsDevice
-* SyncService - client storeEmpty d.store.listManifest(idx); получать сразу из d.store.save*()
 --
 CLAUDE TASK
 END OF TASK
