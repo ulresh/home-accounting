@@ -889,12 +889,10 @@ struct Session : std::enable_shared_from_this<Session> {
                                 // Имя собеседника принимаем всегда, остальных —
                                 // только с бо́льшим счётчиком изменений.
                                 if ((d.pubkey == peer || n.nn > d.nn) &&
-                                    (d.name != n.name || d.nn != n.nn)) {
+                                    (d.name != n.name || d.nn != n.nn ||
+				     d.disabled != n.disabled)) {
                                     d.name = n.name;
                                     d.nn = n.nn;
-                                    devChanged = true;
-                                }
-                                if (d.disabled != n.disabled) {
                                     d.disabled = n.disabled;
                                     devChanged = true;
                                 }
