@@ -833,6 +833,11 @@ ai-r.txt
 ai-r.txt
 ==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-02 08:43:05 | завершено 2026-08-02 08:48:52 ====
 
+Имеет ли смысл заменить enum в pending на указатель
+nullptr / &feedLine / &feedBlock ?
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-02 09:25:37 | завершено 2026-08-02 09:31:22 ====
 
 
 

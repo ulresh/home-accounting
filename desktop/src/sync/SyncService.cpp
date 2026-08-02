@@ -137,10 +137,10 @@ struct Session : std::enable_shared_from_this<Session> {
     // ---------- приём ----------
     QByteArray rbuf;
     qsizetype rbuf_pos = 0;
-    // Ожидаемое чтение всегда ровно одно: либо строка, либо блок — что
-    // именно, говорит pending, поэтому продолжение у них общее.
-    enum Pending { PendNone, PendLine, PendBlock };
-    Pending pending = PendNone;
+    // Ожидаемое чтение всегда ровно одно: либо строка, либо блок. Что ждём —
+    // тем и разбираем, поэтому храним сам разбор (nullptr = не ждём ничего),
+    // а продолжение у обоих общее.
+    bool (Session::*feed)() = nullptr;
     Cont readCb;
     std::size_t blockLeft = 0;
     json::stream_parser sp;
@@ -265,6 +265,7 @@ struct Session : std::enable_shared_from_this<Session> {
         detach(cancelled);
         outq.clear();
         if (outFile.is_open()) outFile.close();
+        feed = nullptr;
         readCb = nullptr; blockSink = nullptr; writeCb = nullptr;
         auto cb = std::move(done);
         done = nullptr;
@@ -296,7 +297,7 @@ struct Session : std::enable_shared_from_this<Session> {
     // -------------------------------------------------- чтение
     void readLine(Cont cb) {
         readCb = std::move(cb);
-        pending = PendLine;
+        feed = &Session::feedLine;
         pump();
     }
 
@@ -307,7 +308,7 @@ struct Session : std::enable_shared_from_this<Session> {
         blockLeft = count;
         blockSink = std::move(sink);
         readCb = std::move(cb);
-        pending = PendBlock;
+        feed = &Session::feedBlock;
         pump();
     }
 
@@ -367,13 +368,11 @@ struct Session : std::enable_shared_from_this<Session> {
         if (inPump || completed) return;
         auto self = shared_from_this();      // цикл ниже переживёт завершение сеанса
         inPump = true;
-        while (!completed && pending != PendNone) {
+        while (!completed && feed) {
             bool ready = false;
-            if (!call([&] {
-                    ready = pending == PendLine ? feedLine() : feedBlock();
-                })) break;
+            if (!call([&] { ready = (this->*feed)(); })) break;
             if (!ready) break;               // ждём данных из сокета
-            pending = PendNone;
+            feed = nullptr;
             auto cb = std::move(readCb);
             readCb = nullptr;
             blockSink = nullptr;
