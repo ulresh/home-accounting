@@ -1,4 +1,5 @@
 #include "SyncDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 #include "../sync/QrCode.h"
 
@@ -76,6 +77,8 @@ SyncDialog::SyncDialog(ha::Store& store, QWidget* parent)
 
     connect(serverBtn_, &QPushButton::clicked, this, &SyncDialog::startServer);
     connect(clientBtn_, &QPushButton::clicked, this, &SyncDialog::startClient);
+
+    ha::ui::rememberGeometry(this, "sync");
 }
 
 SyncDialog::~SyncDialog() {

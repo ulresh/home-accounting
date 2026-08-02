@@ -1,4 +1,5 @@
 #include "DevicesDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QTableWidget>
@@ -34,6 +35,7 @@ DevicesDialog::DevicesDialog(ha::Store& store, QWidget* parent)
 
     reload();
     connect(table_, &QTableWidget::itemChanged, this, &DevicesDialog::onItemChanged);
+    ha::ui::rememberGeometry(this, "devices");
 }
 
 void DevicesDialog::reload() {

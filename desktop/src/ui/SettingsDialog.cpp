@@ -1,4 +1,5 @@
 #include "SettingsDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QComboBox>
@@ -53,6 +54,8 @@ SettingsDialog::SettingsDialog(ha::Store& store, QWidget* parent)
     connect(dbBtn, &QPushButton::clicked, this, &SettingsDialog::switchDb);
     connect(fontSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &SettingsDialog::applyFont);
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::accept);
+
+    ha::ui::rememberGeometry(this, "settings");
 }
 
 void SettingsDialog::reloadDbList() {

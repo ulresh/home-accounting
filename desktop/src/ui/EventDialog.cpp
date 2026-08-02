@@ -1,4 +1,5 @@
 #include "EventDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QComboBox>
@@ -88,6 +89,8 @@ EventDialog::EventDialog(ha::Store& store, const ha::Event* edit, QWidget* paren
     form->addRow(bb);
     connect(bb, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    ha::ui::rememberGeometry(this, "event");
 }
 
 QString EventDialog::eventDateTime() const {

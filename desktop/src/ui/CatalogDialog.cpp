@@ -1,4 +1,5 @@
 #include "CatalogDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QListWidget>
@@ -61,6 +62,7 @@ CatalogDialog::CatalogDialog(ha::Store& store, QWidget* parent)
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::accept);
 
     reloadCats();
+    ha::ui::rememberGeometry(this, "catalog");
 }
 
 QString CatalogDialog::currentCat() const {

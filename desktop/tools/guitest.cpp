@@ -18,6 +18,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QTableWidget>
 #include <QTimer>
 
@@ -413,6 +414,76 @@ static void testFirstRunAndDevices(const fs::path& root) {
     delete dlg;
 }
 
+// ------------------------------------------------------------------- 6 ----
+// Геометрия окон: положение/размер/распахнутость переживают закрытие окна и
+// «перезапуск» (новый экземпляр окна поверх того же QSettings).
+static void testWindowGeometry(const fs::path& root) {
+    std::printf("== 6. запоминание геометрии окон ==\n");
+    { QSettings s; s.remove("windows"); }      // предыдущие тесты тоже её писали
+
+    ha::Store store(root);
+    store.load();
+    store.ensureIdentity();
+
+    {   MainWindow w(store);
+        w.show();
+        w.resize(742, 481);
+        w.move(123, 91);
+        spin(60);
+        w.close();                             // скрытие — момент сохранения
+    }
+    {   QSettings s;
+        check(!s.value("windows/main").toByteArray().isEmpty(),
+              "геометрия главного окна попала в QSettings");
+    }
+    {   MainWindow w(store);                   // как при следующем запуске
+        w.show();
+        spin(60);
+        check(w.size() == QSize(742, 481),
+              "размер главного окна восстановлен (" +
+              std::to_string(w.width()) + "x" + std::to_string(w.height()) + ")");
+        check(w.pos() == QPoint(123, 91),
+              "положение главного окна восстановлено (" +
+              std::to_string(w.x()) + "," + std::to_string(w.y()) + ")");
+        w.close();
+    }
+
+    // Диалог закрывается через accept() — closeEvent не приходит, сохранение
+    // держится на скрытии окна.
+    {   PeopleDialog d(store);
+        d.show();
+        d.resize(415, 502);
+        spin(60);
+        d.accept();
+    }
+    {   PeopleDialog d(store);
+        d.show();
+        spin(60);
+        check(d.size() == QSize(415, 502),
+              "размер диалога восстановлен после accept() (" +
+              std::to_string(d.width()) + "x" + std::to_string(d.height()) + ")");
+        d.accept();
+    }
+
+    // Распахнутость — отдельный признак внутри saveGeometry().
+    {   MainWindow w(store);
+        w.showMaximized();
+        spin(60);
+        w.close();
+    }
+    {   MainWindow w(store);
+        w.show();
+        spin(60);
+        check(w.isMaximized(), "распахнутость восстановлена");
+        w.showNormal();
+        spin(60);
+        check(w.size() == QSize(742, 481),
+              "под распахнутым окном сохранился прежний обычный размер (" +
+              std::to_string(w.width()) + "x" + std::to_string(w.height()) + ")");
+        w.close();
+    }
+}
+
 int main(int argc, char** argv) {
     alarm(90);                        // сторож: если зависнет — процесс убьют
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -421,10 +492,19 @@ int main(int argc, char** argv) {
     fs::path base = fs::current_path() / "guitest-data";
     fs::remove_all(base);
 
+    // QSettings — в тестовую папку и под тестовым именем: настоящий
+    // ~/.config пользователя тесты трогать не должны.
+    QCoreApplication::setOrganizationName("home-accounting-test");
+    QCoreApplication::setApplicationName("guitest");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       QString::fromStdString(base.string()));
+
     testMainWindow(base / "main" / ".data" / "home-accounting");
     testCatalogAndPeople(base / "cat" / ".data" / "home-accounting");
     testSyncCancel(base / "sync" / ".data" / "home-accounting");
     testFirstRunAndDevices(base / "dev" / ".data" / "home-accounting");
+    testWindowGeometry(base / "geom" / ".data" / "home-accounting");
 
     std::printf("\n==== итог: %d/%d пройдено ====\n", g_total - g_fail, g_total);
     if (!g_fail) fs::remove_all(base);

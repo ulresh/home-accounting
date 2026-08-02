@@ -32,6 +32,7 @@ set(HA_SOURCES
     src/ui/PeopleDialog.cpp
     src/ui/DevicesDialog.cpp
     src/ui/FirstRunDialog.cpp
+    src/ui/WindowGeometry.cpp
     src/ui/MainWindow.h
     src/ui/EventDialog.h
     src/ui/SyncDialog.h
@@ -40,6 +41,7 @@ set(HA_SOURCES
     src/ui/PeopleDialog.h
     src/ui/DevicesDialog.h
     src/ui/FirstRunDialog.h
+    src/ui/WindowGeometry.h
     resources/app.qrc
 )
 

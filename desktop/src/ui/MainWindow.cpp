@@ -5,6 +5,7 @@
 #include "SettingsDialog.h"
 #include "CatalogDialog.h"
 #include "PeopleDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QTableWidget>
@@ -91,6 +92,7 @@ MainWindow::MainWindow(ha::Store& store, QWidget* parent)
     statusBar()->addPermanentWidget(dbLabel_);
 
     refresh();
+    ha::ui::rememberGeometry(this, "main");
 }
 
 int MainWindow::selectedRow() const {

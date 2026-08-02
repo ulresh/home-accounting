@@ -1,4 +1,5 @@
 #include "PeopleDialog.h"
+#include "WindowGeometry.h"
 #include "../model/Store.h"
 
 #include <QListWidget>
@@ -37,6 +38,7 @@ PeopleDialog::PeopleDialog(ha::Store& store, QWidget* parent)
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::accept);
 
     reload();
+    ha::ui::rememberGeometry(this, "people");
 }
 
 void PeopleDialog::reload(const QString& select) {

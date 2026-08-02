@@ -882,6 +882,19 @@ CLAUDE SINGLE DEFAULT folder=home-accounting session=6a3f6bff-8843-4239-844b-fc6
 ai-r.txt
 ==== CLAUDE folder=home-accounting session=6a3f6bff-8843-4239-844b-fc636ddb340e sessionId=6a3f6bff-8843-4239-844b-fc636ddb340e | отправлено 2026-08-02 20:18:18 | завершено 2026-08-02 20:20:40 ====
 
+Я хочу запоминать изменение позиции/размера/распахнутости окон между
+открытиями окон и между запусками приложения.
+Насколько адекватно будет писать это информацию в config.json?
+Какие ещё варианты хранилищ ты можешь предложить для этой информации?
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=6a3f6bff-8843-4239-844b-fc636ddb340e sessionId=6a3f6bff-8843-4239-844b-fc636ddb340e | отправлено 2026-08-02 20:26:15 | завершено 2026-08-02 20:27:33 ====
+
+Сделай запоминание геометрии окон через QSettings.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=6a3f6bff-8843-4239-844b-fc636ddb340e sessionId=6a3f6bff-8843-4239-844b-fc636ddb340e | отправлено 2026-08-02 20:32:49 | завершено 2026-08-02 20:37:19 ====
+
 
 
 
