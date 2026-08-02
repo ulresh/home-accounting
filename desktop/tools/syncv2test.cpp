@@ -995,6 +995,60 @@ int main(int argc, char** argv) {
         check(ra_.peerName == "Свой", "в результате имя партнёра");
     }
 
+    // ====== 14. Новая база наследует имя текущего устройства ======
+    {
+        std::cout << "== 14. новая база наследует имя устройства ==\n";
+        fs::remove_all("./sv2-14");
+        fs::path r = "./sv2-14/.data/home-accounting";
+        Store S(r); S.load(); S.ensureIdentity();
+        S.setDeviceName("Ноутбук");
+
+        S.switchDatabase("Семейная", true);
+        check(S.database() == "Семейная", "база создана и стала текущей");
+        check(S.deviceName() == "Ноутбук",
+              "новая база взяла имя устройства из прежней (" + S.deviceName() + ")");
+        {   Store S2(r); S2.load();
+            check(S2.deviceName() == "Ноутбук",
+                  "имя записано в device.jsonl новой базы (" + S2.deviceName() + ")"); }
+
+        // Дальше имена у баз независимы: переименование в одной другую не трогает.
+        S.setDeviceName("Ноутбук Петра");
+        S.switchDatabase("Основная", false);
+        check(S.deviceName() == "Ноутбук",
+              "в прежней базе имя осталось прежним (" + S.deviceName() + ")");
+        S.switchDatabase("Семейная", false);
+        check(S.deviceName() == "Ноутбук Петра",
+              "переключение на существующую базу имя не переносит (" +
+              S.deviceName() + ")");
+    }
+
+    // ====== 15. Первый запуск: «Основная» не создаётся при другом имени ======
+    {
+        std::cout << "== 15. первый запуск с другим именем базы ==\n";
+        fs::remove_all("./sv2-15");
+        fs::path r = "./sv2-15/.data/home-accounting";
+        Store S(r);
+        check(S.isFirstRun(), "первый запуск определён до load()");
+        S.setInitialDatabase("Семейная");        // как введено в FirstRunDialog
+        S.load(); S.ensureIdentity();
+        S.setDeviceName("Ноутбук");
+
+        check(S.database() == "Семейная", "текущая база — введённая");
+        check(!fs::exists(r / "Основная"), "папка «Основная» не создана");
+        auto dbs = S.databases();
+        check(dbs.size() == 1 && dbs.front() == "Семейная",
+              "в database.jsonl только введённая база (" +
+              std::to_string(dbs.size()) + ")");
+        check(fs::exists(r / "Семейная" / "device.jsonl"),
+              "база создана под своим именем");
+
+        Store S2(r);
+        check(!S2.isFirstRun(), "повторный запуск первым не считается");
+        S2.load();
+        check(S2.database() == "Семейная" && S2.deviceName() == "Ноутбук",
+              "после перезапуска та же база и то же имя устройства");
+    }
+
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
     return g_fail == 0 ? 0 : 1;
 }

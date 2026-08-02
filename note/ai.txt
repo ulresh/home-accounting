@@ -863,6 +863,27 @@ DONE Проверить empty NN=0
 
 
 
+!2026-08-02 20:06:05
+
+CLAUDE SINGLE DEFAULT folder=home-accounting session= ENABLE-ALL
+
+При создании новой базы данных возьми имя текущего устройства из предыдущей
+базы данных.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting sessionId=6a3f6bff-8843-4239-844b-fc636ddb340e | отправлено 2026-08-02 20:07:36 | завершено 2026-08-02 20:11:13 ====
+
+CLAUDE SINGLE DEFAULT folder=home-accounting session=6a3f6bff-8843-4239-844b-fc636ddb340e ENABLE-ALL
+
+Не создавай базу данных "Основная" если при первом запуске введено
+другое имя базы данных.
+Приложение под андроид пока не трогай.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=6a3f6bff-8843-4239-844b-fc636ddb340e sessionId=6a3f6bff-8843-4239-844b-fc636ddb340e | отправлено 2026-08-02 20:18:18 | завершено 2026-08-02 20:20:40 ====
+
+
+
 
 
 

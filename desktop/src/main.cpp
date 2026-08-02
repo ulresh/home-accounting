@@ -15,6 +15,18 @@ int main(int argc, char** argv) {
 
     ha::Store store;
     const bool firstRun = store.isFirstRun();   // до чтения/создания конфигурации
+
+    // Спрашиваем ДО load(): база создаётся уже под введённым именем, иначе
+    // рядом осталась бы никому не нужная «Основная».
+    QString deviceName;
+    if (firstRun) {
+        FirstRunDialog dlg(QSysInfo::machineHostName(),
+                           QString::fromStdString(store.database()));
+        dlg.exec();
+        deviceName = dlg.deviceName();
+        store.setInitialDatabase(dlg.databaseName().toStdString());
+    }
+
     try {
         store.load();
         store.ensureIdentity();   // ключ/сертификат + номер устройства
@@ -24,15 +36,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (firstRun) {            // спросить имя устройства и имя базы
-        FirstRunDialog dlg(QSysInfo::machineHostName(),
-                           QString::fromStdString(store.database()));
-        dlg.exec();
-        auto db = dlg.databaseName();
-        if (!db.isEmpty() && db.toStdString() != store.database())
-            store.switchDatabase(db.toStdString(), true);
-        store.setDeviceName(dlg.deviceName().toStdString());
-    }
+    if (firstRun) store.setDeviceName(deviceName.toStdString());
 
     if (store.fontSize() > 0) {                 // применить сохранённый размер шрифта
         QFont f = app.font();

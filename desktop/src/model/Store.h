@@ -118,6 +118,10 @@ public:
 
     // --- конфигурация / база ---
     const std::string& database() const { return db_; }
+    // Имя базы ДО первой загрузки: на первом запуске его спрашивают у
+    // пользователя, и создавать надо сразу его — «Основная» не должна
+    // появиться ни в database.jsonl, ни отдельной папкой.
+    void setInitialDatabase(const std::string& name) { if (!name.empty()) db_ = name; }
     int  deviceNo() const { return deviceNo_; }
     std::vector<std::string> databases() const;
     void switchDatabase(const std::string& name, bool create);

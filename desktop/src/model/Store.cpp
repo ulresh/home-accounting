@@ -309,8 +309,10 @@ std::vector<std::string> Store::databases() const {
 void Store::switchDatabase(const std::string& name, bool create) {
     auto dbs = databases();
     bool exists = std::find(dbs.begin(), dbs.end(), name) != dbs.end();
+    std::string prevName;         // имя нашего устройства в прежней базе
     if (!exists) {
         if (!create) return;
+        prevName = deviceName();  // новая база наследует его (спрашивать заново незачем)
         dbs.push_back(name);
         std::string content;
         for (auto& d : dbs) content += json::serialize(jv(d)) + "\n";
@@ -320,6 +322,9 @@ void Store::switchDatabase(const std::string& name, bool create) {
     deviceNo_ = 0;
     loadDevices();
     ensureIdentity(true);
+    // Имя переносим, только если в новой базе его ещё нет: папка базы могла
+    // остаться от прежней жизни (в database.jsonl её нет, а device.jsonl есть).
+    if (!prevName.empty() && deviceName().empty()) setDeviceName(prevName);
     loadPeople(); loadCatalog(); loadEvents();
 }
 
