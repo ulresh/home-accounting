@@ -199,7 +199,6 @@ struct Session : std::enable_shared_from_this<Session> {
                 peer = peerPubkeyOf(sock);
                 if (peer.empty()) { fail("no peer certificate"s); return; }
                 res.peerPubkey = peer;
-                notePeer(true);
                 call([&] { onReady(); });
             }));
         conns.push_back(QObject::connect(s, &QSslSocket::sslErrors, s,
@@ -1150,6 +1149,7 @@ struct Session : std::enable_shared_from_this<Session> {
             }
             // Код верный — этот сеанс и есть партнёр.
             if (onElected) { auto f = std::move(onElected); onElected = nullptr; f(); }
+            notePeer(true);        // до верного кода собеседника ещё нет
             if (store.deviceDisabled(peer)) {
                 res.error = "disabled"sv;
                 send(R"(["error","disabled"])" "\n"s);
@@ -1231,6 +1231,7 @@ struct Session : std::enable_shared_from_this<Session> {
     PairInfo info;
 
     void clientGo() {
+        notePeer(true);                     // партнёр известен сразу
         if (store.deviceDisabled(peer)) {   // прямая синхронизация запрещена
             res.error = "disabled"sv;
             finish();

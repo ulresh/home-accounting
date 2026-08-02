@@ -945,6 +945,56 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ====== 13. Имя собеседника сообщается только после верного кода ======
+    // До проверки кода подключений может быть сколько угодно: объявлять
+    // собеседником любого подключившегося нельзя.
+    {
+        std::cout << "== 13. имя собеседника — после верного кода ==\n";
+        fs::remove_all("/tmp/hv13a"); fs::remove_all("/tmp/hv13b");
+        fs::remove_all("/tmp/hv13c");
+        fs::path ra = "/tmp/hv13a/.data/home-accounting";
+        fs::path rb = "/tmp/hv13b/.data/home-accounting";
+        fs::path rc = "/tmp/hv13c/.data/home-accounting";
+        Store A(ra); A.load(); A.ensureIdentity(); A.setDeviceName("Сервер");
+        Store B(rb); B.load(); B.ensureIdentity(); B.setDeviceName("Свой");
+        Store C(rc); C.load(); C.ensureIdentity(); C.setDeviceName("Чужой");
+        A.addEvent("2027-03-01", "Лампа", 300, "", "", "");
+        sync(A, B);
+        sync(A, C);
+        check(A.deviceNameOf(C.myPubkey()) == "Чужой", "A знает имя C");
+        check(A.deviceNameOf(B.myPubkey()) == "Свой", "и имя B");
+
+        std::vector<std::string> seen;      // что сервер сообщал наверх
+        SyncResult ra_, rb_, rc_;
+        int srvDone = 0;
+        bool cDone = false;
+        SyncServer s(A);
+        PairInfo info = s.start(YES,
+            [&](const SyncResult& r) { ra_ = r; ++srvDone; },
+            [&](const std::string& n, const std::string&) { seen.push_back(n); });
+        info.ip = "127.0.0.1";
+
+        // известное устройство, но код неверный
+        PairInfo bad = info;
+        bad.code = "WRONGCOD";
+        SyncClient cc(C);
+        cc.start(bad, YES, [&](const SyncResult& r) { rc_ = r; cDone = true; });
+        spin([&] { return cDone; }, 5000);
+        check(rc_.error == "bad_code", "чужому отказано по коду");
+        check(seen.empty(), "имя чужого подключения наверх не ушло");
+        check(srvDone == 0, "сервер продолжает ждать настоящего партнёра");
+
+        // а теперь настоящий партнёр
+        SyncClient cb(B);
+        cb.start(info, YES, [&](const SyncResult& r) { rb_ = r; ++srvDone; });
+        spin([&] { return srvDone == 2; }, 10000);
+        check(ra_.ok && rb_.ok, "синхронизация прошла");
+        check(seen.size() == 1 && seen.front() == "Свой",
+              "имя сообщено один раз и только после верного кода (" +
+              std::to_string(seen.size()) + ")");
+        check(ra_.peerName == "Свой", "в результате имя партнёра");
+    }
+
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
     return g_fail == 0 ? 0 : 1;
 }

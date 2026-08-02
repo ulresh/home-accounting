@@ -839,6 +839,15 @@ nullptr / &feedLine / &feedBlock ?
 ai-r.txt
 ==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-02 09:25:37 | завершено 2026-08-02 09:31:22 ====
 
+notePeer сразу после рукопожатия для серверной стороны всё таки на мой
+взгляд рано. Пока не проверили код, их может быть много разных.
+Для сервера notePeer имеет смысл вызвать только после проверки кода.
+Для клиента notePeer можно вставить в начало clientGo.
+
+ai-r.txt
+==== CLAUDE folder=home-accounting session=bda70028-e895-487d-b90a-bc47cb3768f9 sessionId=bda70028-e895-487d-b90a-bc47cb3768f9 | отправлено 2026-08-02 11:24:29 | завершено 2026-08-02 11:32:12 ====
+
+
 
 
 
