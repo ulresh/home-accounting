@@ -170,16 +170,18 @@ public:
     int knowsDevice(const std::string &pubkey) const;
     bool hasData() const;
     int  maxDeviceNo() const;
-    int addDevice(std::string_view pubkey);
+    int addDevice(std::string_view pubkey, std::string_view name = {});
     void addDevice(std::unique_ptr<std::ofstream> &outp,
 		   int no, const std::string &pubkey,
-		   const std::string &name = {}, bool disabled = false);
+		   const std::string &name = {}, int nn = 0,
+		   bool disabled = false);
 
     // --- имя устройства и признак «Отключено» ---
     // Имя своего устройства правит только пользователь: синхронизация его не
     // меняет. «Отключено» = с этим устройством нельзя синхронизироваться
     // напрямую; на своём устройстве признак не имеет смысла и не ставится.
     const std::string &deviceName() const;            // имя текущего устройства
+    int deviceNn() const;                             // счётчик его изменений
     void setDeviceName(const std::string &name);
     void setDeviceDisabled(int no, bool disabled);    // кроме текущего
     const Device *findDevice(const std::string &pubkey) const;

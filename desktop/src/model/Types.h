@@ -64,32 +64,32 @@ struct Event {
     }
 };
 
-// Устройство сети: [DN, "<публичный ключ>", "<имя>", "disabled"].
-// Третий элемент — имя устройства (задаёт его владелец), дальше необязательные
-// строковые признаки; сейчас единственный — "disabled": с этим устройством
-// нельзя проводить прямую синхронизацию.
-// Совместимость: в прежнем формате в третьем элементе стоял маркер "this"
-// (собственное устройство). Читаем его как отсутствие имени.
+// Устройство сети: [DN, "<публичный ключ>", "<имя>", NN, "disabled"].
+// Имя задаёт владелец устройства; NN — сколько раз это имя менялось (0 при
+// создании, +1 на каждое изменение): по нему разрешается гонка, когда одно и
+// то же имя пришло с разных сторон. Дальше необязательные строковые признаки;
+// сейчас единственный — "disabled": с этим устройством нельзя проводить
+// прямую синхронизацию.
 struct Device {
     Device(int no, std::string_view pubkey, std::string_view name = {},
-	   bool disabled = false)
-	: no(no), pubkey(pubkey), name(name), disabled(disabled)
+	   int nn = 0, bool disabled = false)
+	: no(no), pubkey(pubkey), name(name), nn(nn), disabled(disabled)
     {}
     Device(const json::value &v) {
 	auto& a = v.as_array();
 	no = jsonAsDevNo(a[0]);
 	pubkey = std::string(a[1].as_string());
-	if(a.size() > 2 && a[2].is_string()) {
-	    name = std::string(a[2].as_string());
-	    if(name == "this"sv) name.clear();   // маркер прежнего формата
-	}
-	for(std::size_t i = 3; i < a.size(); ++i)
+	if(a.size() > 2 && a[2].is_string()) name = std::string(a[2].as_string());
+	// boost::json кладёт неотрицательное целое в int64 (см. памятку §7)
+	if(a.size() > 3 && a[3].is_int64()) nn = (int)a[3].as_int64();
+	for(std::size_t i = 4; i < a.size(); ++i)
 	    if(a[i].is_string() && a[i].as_string() == "disabled"sv)
 		disabled = true;
     }
     int         no = 0; // DN — порядковый номер
     std::string pubkey; // полный публичный ключ (PEM SPKI, base64 одной строкой)
     std::string name;   // имя устройства (для показа пользователю)
+    int         nn = 0; // сколько раз имя менялось
     bool disabled = false;  // прямая синхронизация с ним запрещена
 };
 

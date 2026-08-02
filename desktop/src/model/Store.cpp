@@ -330,13 +330,14 @@ void Store::loadDevices() {
     });
 }
 
-// [DN,"<ключ>","<имя>","disabled"] — имя пишем, если оно есть либо если за
-// ним следуют признаки (позиция обязана сохраниться).
+// [DN,"<ключ>","<имя>",NN,"disabled"] — имя и NN пишем всегда: за ними могут
+// стоять признаки, а их позиция обязана сохраниться.
 std::string Store::deviceLine(const Device &d) {
     json::array a;
     a.emplace_back(d.no);
     a.emplace_back(d.pubkey);
-    if (!d.name.empty() || d.disabled) a.emplace_back(d.name);
+    a.emplace_back(d.name);
+    a.emplace_back(d.nn);
     if (d.disabled) a.emplace_back("disabled"sv);
     return json::serialize(a);
 }
@@ -865,7 +866,7 @@ int Store::maxDeviceNo() const {
     return m;
 }
 
-int Store::addDevice(std::string_view pubkey) {
+int Store::addDevice(std::string_view pubkey, std::string_view name) {
     int m = 0;
     for(auto& d : devices_) {
 	// могла быть незавершённая синхронизация, при которой мы добавили собеседника, но собеседник у себя синхронизацию не записал
@@ -874,7 +875,7 @@ int Store::addDevice(std::string_view pubkey) {
     }
     if(m == std::numeric_limits<int>::max())
 	throw std::runtime_error("too big device no"s);
-    devices_.push_back(Device{++m, std::string(pubkey)});
+    devices_.push_back(Device{++m, pubkey, name});
     // saveDevices();
     appendLine(pDevice(), deviceLine(devices_.back()));
     return m;
@@ -882,8 +883,8 @@ int Store::addDevice(std::string_view pubkey) {
 
 void Store::addDevice(std::unique_ptr<std::ofstream> &outp,
 		      int no, const std::string &pubkey,
-		      const std::string &name, bool disabled) {
-    devices_.emplace_back(no, pubkey, name, disabled);
+		      const std::string &name, int nn, bool disabled) {
+    devices_.emplace_back(no, pubkey, name, nn, disabled);
     auto op = outp.get();
     if(!op) outp.reset(op = new std::ofstream(pDevice(),
 			std::ios::binary | std::ios::app));
@@ -896,11 +897,16 @@ const std::string &Store::deviceName() const {
     for (auto& d : devices_) if (d.no == deviceNo_) return d.name;
     return empty;
 }
+int Store::deviceNn() const {
+    for (auto& d : devices_) if (d.no == deviceNo_) return d.nn;
+    return 0;
+}
 void Store::setDeviceName(const std::string &name) {
     for (auto& d : devices_)
 	if (d.no == deviceNo_) {
 	    if (d.name == name) return;
 	    d.name = name;
+	    ++d.nn;              // счётчик изменений: по нему решается гонка
 	    saveDevices();
 	    return;
 	}

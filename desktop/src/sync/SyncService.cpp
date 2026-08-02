@@ -175,6 +175,7 @@ struct Session : std::enable_shared_from_this<Session> {
 
     // ---------- состояние протокола ----------
     std::string peer;          // открытый ключ партнёра
+    std::string peerNameHint;  // имя партнёра из hello / ["empty",…]
     int  peerDeviceNo = 0;
     bool storeEmpty = false;
     json::value  av;           // текущая команда (живёт, пока её читают)
@@ -591,7 +592,8 @@ struct Session : std::enable_shared_from_this<Session> {
     //     Отдать всё партнёру, у которого ещё ничего нет
     // ============================================================
     void sendAllToEmptyPeer(bool recv_follow, Cont next) {
-        peerDeviceNo = store.addDevice(peer);
+        peerDeviceNo = store.addDevice(peer, peerNameHint);
+        notePeer();
         queueFullFile("device"sv);
         ++res.sent;
         if (!store.people_.empty() || !store.people_delete.empty()) {
@@ -627,9 +629,7 @@ struct Session : std::enable_shared_from_this<Session> {
     std::vector<Device> newDevices;
     int newDeviceNo = 0;
     std::string myName;
-    // У партнёра наше имя/флаг оказались не нашими: его копия списка устройств
-    // устарела, значит «партнёр это уже имеет» про неё писать нельзя.
-    bool selfDiffers = false;
+    int myNn = 0;
     Store::People newPeople, newPeopleDelete, *pPeople = nullptr;
     std::unique_ptr<CatalogLoader> catLoader;
     std::unique_ptr<MonthEvents> monthEv;
@@ -652,16 +652,19 @@ struct Session : std::enable_shared_from_this<Session> {
             newDeviceNo = 0;
             peerDeviceNo = 0;
             myName = store.deviceName();   // своё имя синхронизация не меняет
+            myNn = store.deviceNn();
             readBlock((std::size_t)ao->at(1).as_int64(),
                 [this](const json::value& v) {
                     newDevices.push_back(Device(v));
                     if (newDevices.back().pubkey == store.myPubkey_) {
                         if (newDeviceNo) throw std::runtime_error("bad protocol"s);
                         newDeviceNo = newDevices.back().no;
-                        if (newDevices.back().name != myName ||
-                            newDevices.back().disabled) selfDiffers = true;
-                        newDevices.back().name = myName;
-                        newDevices.back().disabled = false;
+                        // Отключённым нас прислать не могли: отключивший нас
+                        // ничего бы не передал.
+                        if (newDevices.back().disabled)
+                            throw std::runtime_error("bad protocol"s);
+                        newDevices.back().name = myName;   // своё имя — своё
+                        newDevices.back().nn = myNn;
                     }
                     else if (newDevices.back().pubkey == peer) {
                         if (peerDeviceNo) throw std::runtime_error("bad protocol"s);
@@ -678,9 +681,6 @@ struct Session : std::enable_shared_from_this<Session> {
                     store.devices_.swap(newDevices);
                     store.deviceNo_ = newDeviceNo;
                     store.saveDevices(&idx.device);
-                    // Отдачи в этом сеансе уже не будет: пометим список
-                    // устройств неотданным, уйдёт при следующей синхронизации.
-                    if (selfDiffers) idx.device = FileState{};
                     store.saveConfig();
                     notePeer();          // теперь имя партнёра известно
                     again();
@@ -787,9 +787,7 @@ struct Session : std::enable_shared_from_this<Session> {
             tmp = store.stateOf(store.pDevice());
             cur = &tmp;
         }
-        // selfDiffers: у партнёра наше имя/флаг устарели — список надо отдать,
-        // даже если по состоянию файла кажется, что он у него уже есть.
-        if (idx.device != *cur || (recv_done && selfDiffers)) {
+        if (idx.device != *cur) {
             queueFullFile("device"sv);
             ++res.sent;
             if (!recv_done) idx.device = *cur;
@@ -880,21 +878,25 @@ struct Session : std::enable_shared_from_this<Session> {
                         for (auto& d : store.devices_)
                             if (d.pubkey == n.pubkey) {
                                 idxNew.dnMap[n.no] = d.no;
-                                // Своё имя и свой признак «Отключено»
-                                // синхронизация не меняет.
                                 if (d.no == store.deviceNo()) {
-                                    if (d.name != n.name || d.disabled != n.disabled)
-                                        selfDiffers = true;
+                                    // Своё имя и свой признак синхронизация не
+                                    // меняет. Отключённым нас прислать не могли:
+                                    // отключивший нас ничего бы не передал.
+                                    if (n.disabled)
+                                        throw std::runtime_error("bad protocol"s);
+                                    return;
                                 }
-                                else {
-                                    if (d.name != n.name) {
-                                        d.name = n.name;
-                                        devChanged = true;
-                                    }
-                                    if (d.disabled != n.disabled) {
-                                        d.disabled = n.disabled;
-                                        devChanged = true;
-                                    }
+                                // Имя собеседника принимаем всегда, остальных —
+                                // только с бо́льшим счётчиком изменений.
+                                if ((d.pubkey == peer || n.nn > d.nn) &&
+                                    (d.name != n.name || d.nn != n.nn)) {
+                                    d.name = n.name;
+                                    d.nn = n.nn;
+                                    devChanged = true;
+                                }
+                                if (d.disabled != n.disabled) {
+                                    d.disabled = n.disabled;
+                                    devChanged = true;
                                 }
                                 return;
                             }
@@ -902,7 +904,7 @@ struct Session : std::enable_shared_from_this<Session> {
                         if (busyno) reno.push_back(std::move(n));
                         else {
                             store.addDevice(devOut, n.no, n.pubkey,
-                                            n.name, n.disabled);
+                                            n.name, n.nn, n.disabled);
                             idxNew.dnMap[n.no] = n.no;
                         }
                     },
@@ -913,7 +915,7 @@ struct Session : std::enable_shared_from_this<Session> {
                                 if (m == std::numeric_limits<int>::max())
                                     throw std::runtime_error("too big device no"s);
                                 store.addDevice(devOut, ++m, n.pubkey,
-                                                n.name, n.disabled);
+                                                n.name, n.nn, n.disabled);
                                 idxNew.dnMap[n.no] = m;
                             }
                             reno.clear();
@@ -929,11 +931,7 @@ struct Session : std::enable_shared_from_this<Session> {
                             riNext(false);
                             return;
                         }
-                        // У сервера отдача уже прошла — партнёр не увидит
-                        // нашего имени до следующего сеанса; у клиента отдача
-                        // впереди, там список уйдёт (см. sendAllIncrement).
-                        idxNew.device = selfDiffers && !riSendFollow
-                                ? FileState{} : store.stateOf(store.pDevice());
+                        idxNew.device = store.stateOf(store.pDevice());
                         again();
                     });
                 return;
@@ -1153,6 +1151,8 @@ struct Session : std::enable_shared_from_this<Session> {
             std::string clientCode(h.at(0).as_string());
             std::string clientDb(h.at(1).as_string());
             bool clientEmpty = h.size() > 2 && h[2].as_string() == "empty"sv;
+            if (clientEmpty && h.size() > 3 && h[3].is_string())
+                peerNameHint = std::string(h[3].as_string());
             res.peerDb = clientDb;
 
             if (clientCode != code) {
@@ -1184,7 +1184,8 @@ struct Session : std::enable_shared_from_this<Session> {
 
             if (!store.hasData()) {
                 if (clientEmpty) {
-                    peerDeviceNo = store.addDevice(peer);
+                    peerDeviceNo = store.addDevice(peer, peerNameHint);
+                    notePeer();
                     queueFullFile("device"sv);
                     send(R"(["end"])" "\n"s);
                     flush([this] {
@@ -1199,7 +1200,11 @@ struct Session : std::enable_shared_from_this<Session> {
                     });
                 }
                 else {
-                    send(R"(["empty"])" "\n"s);
+                    {   json::array e;
+                        e.emplace_back("empty"sv);
+                        e.emplace_back(store.deviceName());
+                        send(json::serialize(e) + "\n"s);
+                    }
                     flush([this] {
                         cmdNext([this] {
                             recvAllWhenEmpty([this] { finish(); });
@@ -1250,7 +1255,11 @@ struct Session : std::enable_shared_from_this<Session> {
         json::array hello;
         hello.emplace_back(info.code);
         hello.emplace_back(store.database());
-        if (storeEmpty) hello.emplace_back("empty"sv);
+        if (storeEmpty) {
+            hello.emplace_back("empty"sv);
+            // Пустому нечего отдавать, а имя партнёру знать надо — шлём его тут.
+            hello.emplace_back(store.deviceName());
+        }
         send(json::serialize(hello) + "\n"s);
         flush([this] {
             cmdNext([this] {
@@ -1266,6 +1275,8 @@ struct Session : std::enable_shared_from_this<Session> {
                     return;
                 }
                 if (cmd == "empty"sv) {
+                    if (ao->size() > 1 && ao->at(1).is_string())
+                        peerNameHint = std::string(ao->at(1).as_string());
                     sendAllToEmptyPeer(false, [this] { finish(); });
                     return;
                 }

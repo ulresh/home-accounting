@@ -100,6 +100,33 @@ static std::string readFile(const fs::path& p) {
     return std::string((std::istreambuf_iterator<char>(in)), {});
 }
 
+// Подправить строку устройства прямо в файле (имитация чужого/испорченного
+// списка): имя+NN и признак «Отключено».
+static void patchDevice(const fs::path& root, const std::string& pubkey,
+                        const std::string& name, int nn, bool disabled) {
+    fs::path p = root / "Основная" / "device.jsonl";
+    std::string out;
+    std::ifstream in(p);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        auto v = json::parse(line);
+        auto& a = v.as_array();
+        if (a.size() > 1 && a[1].is_string() &&
+            std::string(a[1].as_string()) == pubkey) {
+            while (a.size() < 4) a.emplace_back(json::value());
+            a[2] = name;
+            a[3] = nn;
+            a.erase(a.begin() + 4, a.end());
+            if (disabled) a.emplace_back("disabled");
+        }
+        out += json::serialize(v) + "\n";
+    }
+    in.close();
+    std::ofstream o(p, std::ios::binary | std::ios::trunc);
+    o << out;
+}
+
 static int countSubject(Store& s, const std::string& subj) {
     int n = 0;
     for (auto& e : s.events()) if (e->subject == subj) ++n;
@@ -788,14 +815,12 @@ int main(int argc, char** argv) {
               "B узнал имя устройства A (" + B.deviceNameOf(A.myPubkey()) + ")");
         check(r1b.peerName == "Ноутбук",
               "клиенту сообщено имя партнёра (" + r1b.peerName + ")");
-
-        // Имя B доедет до A на следующей синхронизации: при первом сопряжении
-        // пустой клиент только принимает список.
-        auto [r2a, r2b] = sync(A, B);
+        // Пустому клиенту нечего отдавать, поэтому своё имя он передаёт в
+        // hello — оно доезжает уже в первом сеансе.
         check(A.deviceNameOf(B.myPubkey()) == "Телефон",
-              "A узнал имя устройства B (" + A.deviceNameOf(B.myPubkey()) + ")");
-        check(r2a.peerName == "Телефон",
-              "серверу сообщено имя партнёра (" + r2a.peerName + ")");
+              "A узнал имя B из hello (" + A.deviceNameOf(B.myPubkey()) + ")");
+        check(r1a.peerName == "Телефон",
+              "серверу сообщено имя партнёра (" + r1a.peerName + ")");
         check(A.deviceName() == "Ноутбук", "своё имя у A по-прежнему своё");
 
         // Переименование доезжает при следующей синхронизации
@@ -843,6 +868,81 @@ int main(int argc, char** argv) {
         check(!B2.deviceDisabled(B2.myPubkey()) &&
               B2.deviceName() == "Телефон Петра",
               "после перезагрузки своё имя и флаг на месте");
+    }
+
+    // ====== 12. NN: чьё имя устройства побеждает ======
+    {
+        std::cout << "== 12. NN: гонка имён устройств ==\n";
+        fs::remove_all("/tmp/hv12a"); fs::remove_all("/tmp/hv12b");
+        fs::path ra = "/tmp/hv12a/.data/home-accounting";
+        fs::path rb = "/tmp/hv12b/.data/home-accounting";
+        std::string keyA, keyB;
+        {
+            Store A(ra); A.load(); A.ensureIdentity(); A.setDeviceName("A");
+            Store B(rb); B.load(); B.ensureIdentity(); B.setDeviceName("B");
+            A.addEvent("2027-02-01", "Гайка", 10, "", "", "");
+            sync(A, B);
+            keyA = A.myPubkey(); keyB = B.myPubkey();
+            A.addDevice("PUBKEY-X");
+            B.addDevice("PUBKEY-X");
+        }
+        // одно и то же третье устройство названо по-разному
+        patchDevice(ra, "PUBKEY-X", "Икс-старое", 1, false);
+        patchDevice(rb, "PUBKEY-X", "Икс-новое", 9, false);
+        {
+            Store A(ra); A.load(); A.ensureIdentity();
+            Store B(rb); B.load(); B.ensureIdentity();
+            sync(A, B);
+            check(A.deviceNameOf("PUBKEY-X") == "Икс-новое",
+                  "имя с бо́льшим NN победило у A (" +
+                  A.deviceNameOf("PUBKEY-X") + ")");
+            check(B.deviceNameOf("PUBKEY-X") == "Икс-новое",
+                  "и осталось у B (" + B.deviceNameOf("PUBKEY-X") + ")");
+        }
+        // меньший NN чужое имя не перебивает
+        patchDevice(ra, "PUBKEY-X", "Икс-обратно", 2, false);
+        {
+            Store A(ra); A.load(); A.ensureIdentity();
+            Store B(rb); B.load(); B.ensureIdentity();
+            sync(A, B);
+            check(B.deviceNameOf("PUBKEY-X") == "Икс-новое",
+                  "меньший NN не перебил имя у B (" +
+                  B.deviceNameOf("PUBKEY-X") + ")");
+            // Откатиться к меньшему NN в жизни нельзя (это правка файла в
+            // обход модели), а вернётся имя к A со следующей отдачей списка —
+            // как только у B поменяется файл устройств.
+            B.addDevice("PUBKEY-W");
+            sync(A, B);
+            check(A.deviceNameOf("PUBKEY-X") == "Икс-новое",
+                  "имя с бо́льшим NN вернулось к A со следующим списком (" +
+                  A.deviceNameOf("PUBKEY-X") + ")");
+        }
+        // а имя САМОГО собеседника принимается всегда, хоть с меньшим NN
+        patchDevice(ra, keyB, "Кличка", 99, false);
+        {
+            Store A(ra); A.load(); A.ensureIdentity();
+            Store B(rb); B.load(); B.ensureIdentity();
+            B.addDevice("PUBKEY-Y");        // чтобы B отдал свой список
+            sync(A, B);
+            check(A.deviceNameOf(keyB) == "B",
+                  "имя собеседника принято вопреки большему NN (" +
+                  A.deviceNameOf(keyB) + ")");
+        }
+        // «Отключено» на нас в присланном списке — ошибка: отключивший нас
+        // ничего бы и не передал
+        {
+            Store A(ra); A.load(); A.ensureIdentity();
+            Store B(rb); B.load(); B.ensureIdentity();
+            A.addEvent("2027-02-02", "Болт", 20, "", "", "");
+            // правим ФАЙЛ A, память A не трогаем: иначе A сам откажется
+            patchDevice(ra, keyB, "B", 1, true);
+            auto [ea, eb] = sync(A, B);
+            check(!eb.ok, "приём отверг список с «Отключено» на нас");
+            check(eb.error == "bad protocol",
+                  "и назвал это ошибкой протокола (" + eb.error + ")");
+            check(!B.deviceDisabled(keyB), "сам себя B отключённым не считает");
+            (void)ea;
+        }
     }
 
     std::cout << "\n==== итог: " << (g_total - g_fail) << "/" << g_total << " пройдено ====\n";
