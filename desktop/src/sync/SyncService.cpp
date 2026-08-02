@@ -81,7 +81,7 @@ std::string localIPv4() {
         if (a.protocol() != QAbstractSocket::IPv4Protocol) continue;
         return a.toString().toStdString();
     }
-    return "127.0.0.1";
+    return "127.0.0.1"s;
 }
 
 QString qstr(const fs::path& p) { return QString::fromStdString(p.string()); }
